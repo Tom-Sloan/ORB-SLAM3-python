@@ -33,3 +33,5 @@ python demo/run_rgbd.py \
     --settings_file=third_party/ORB_SLAM3/Examples/RGB-D/TUM1.yaml \
     --dataset_path=/mnt/dataset2/TUM/rgbd_dataset_freiburg1_xyz
 ```
+
+[Link to dataset in sample](https://cvg.cit.tum.de/data/datasets/rgbd-dataset/download), download fr1/xyz.
