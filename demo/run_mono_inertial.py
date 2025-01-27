@@ -18,8 +18,6 @@ def load_images(image_path, timestamps_file):
                 line = line.strip()
                 timestamp = float(line.split(',')[0]) / 1e9  # Convert ns to s
                 image_name = line.split(',')[1]
-                print("image_name: ", image_name)
-                print("Timestamp: ", timestamp)
                 image_files.append(os.path.join(image_path, image_name))
                 timestamps.append(timestamp)
     return image_files, timestamps
@@ -78,10 +76,6 @@ def main():
     slam.initialize()
 
     prev_timestamp = None
-    trajectories = []  # List to store trajectories at each frame
-    initialization_frames = 20  # Number of frames to wait before getting trajectory
-    frame_count = 0
-    last_reset_frame = 0  # Track when the system was last reset
     
     # Process sequence
     for img_file, timestamp in zip(image_files, image_timestamps):
@@ -102,42 +96,15 @@ def main():
 
         # Track frame
         tracked = slam.process_image_mono_inertial(img, timestamp, imu_measurements)
-        print(f"Timestamp: {timestamp}, Tracking successful: {tracked} Frame count: {frame_count}")
+        print(f"Timestamp: {timestamp}, Tracking successful: {tracked}")
 
-        frame_count += 1
-
-        # Reset frame counter if tracking was lost or map was reset
-        if "Reseting active map" in str(tracked) or "Reset" in str(tracked):
-            print("Map reset detected - resetting frame counter")
-            last_reset_frame = frame_count
-            continue
-
-        # Only try to get trajectory after some initialization frames since last reset
-        if tracked and (frame_count - last_reset_frame) > initialization_frames:
-            try:
-                current_trajectory = slam.get_trajectory()
-                if current_trajectory and len(current_trajectory) > 0:  # Check if trajectory is not empty
-                    trajectories.append((timestamp, current_trajectory))
-                    print(f"Got trajectory at timestamp {timestamp}")
-                    print(f"Number of poses: {len(current_trajectory)}")
-            except Exception as e:
-                print(f"Error getting trajectory: {e}")
-                # If we get an error, assume we need to reinitialize
-                last_reset_frame = frame_count
+        trajectory = slam.get_trajectory()
+        print(f"Number of poses: {len(trajectory)}")
 
         prev_timestamp = timestamp
 
     # Shutdown SLAM system
     slam.shutdown()
 
-    return trajectories  # Return all trajectories with their timestamps
-
 if __name__ == '__main__':
-    trajectories = main()
-    print(f"Total trajectories collected: {len(trajectories)}")
-    
-    # Print final trajectory information if available
-    if trajectories:
-        last_timestamp, last_trajectory = trajectories[-1]
-        print(f"\nFinal trajectory at timestamp {last_timestamp}:")
-        print(f"Number of poses: {len(last_trajectory)}")
+    main()

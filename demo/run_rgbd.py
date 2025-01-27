@@ -21,9 +21,17 @@ slam = orbslam3.system(args.vocab_file, args.settings_file, orbslam3.Sensor.MONO
 slam.set_use_viewer(False)
 slam.initialize()
 
+start_time = time.time()
+frame_count = 0
+
 for img in img_files:
     timestamp = img.split('/')[-1][:-4]
     img = cv2.imread(img, -1)
     pose = slam.process_image_mono(img, float(timestamp))
-print(slam.get_trajectory())
-    
+    trajectory = slam.get_trajectory()
+    frame_count += 1
+
+elapsed_time = time.time() - start_time
+fps = frame_count / elapsed_time
+print(f"\nProcessed {frame_count} frames in {elapsed_time:.2f} seconds")
+print(f"Average FPS: {fps:.2f}")
