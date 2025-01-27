@@ -1,6 +1,5 @@
 ORB-SLAM3-PYTHON
 ===
-Only currently supports RGB-D datasets.
 
 Python bindings generated using [pybind11](https://pybind11.readthedocs.io/en/stable/). We use a modified version of ORB-SLAM3 (included as a submodule) to exntend interfaces. It might not be the most up-to-date with the original ORB-SLAM3.
 
@@ -32,8 +31,22 @@ Please see the demo at `demo/run_rgb.py` for how to use this code. For example, 
 ```bash
 python demo/run_rgbd.py \
     --vocab_file=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
+    --settings_file=third_party/ORB_SLAM3/Examples/Monocular/EuRoC.yaml \
+    --path_to_images=/mnt/SSD_4T/EuRoC/MH01/mav0/cam0
+```
+
+```bash
+python demo/run_rgbd.py \
+    --vocab_file=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
     --settings_file=third_party/ORB_SLAM3/Examples/RGB-D/TUM1.yaml \
-    --dataset_path=/mnt/SSD_4T/TUM/rgbd_dataset_freiburg1_xyz
+    --path_to_images=/mnt/SSD_4T/TUM/rgbd_dataset_freiburg1_xyz/data
+```
+
+```bash
+python demo/run_mono_inertial.py \
+    --vocab_file=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
+    --settings_file=third_party/ORB_SLAM3/Examples/Monocular-Inertial/EuRoC.yaml \
+    --sequence_path=/mnt/SSD_4T/EuRoC/MH01/
 ```
 
 ## Note

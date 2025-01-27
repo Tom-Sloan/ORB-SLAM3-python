@@ -7,6 +7,7 @@
 #include <ORB_SLAM3/include/Converter.h>
 #include <ORB_SLAM3/include/Tracking.h>
 #include <ORB_SLAM3/include/MapPoint.h>
+#include <ORB_SLAM3/include/ImuTypes.h>
 
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
@@ -66,6 +67,22 @@ bool ORBSLAM3Python::processMono(cv::Mat image, double timestamp)
     }
 }
 
+bool ORBSLAM3Python::processMonoInertial(cv::Mat image, double timestamp, std::vector<ORB_SLAM3::IMU::Point> imuMeas)
+{
+    if (!system)
+    {
+        return false;
+    }
+    if (image.data)
+    {
+        Sophus::SE3f pose = system->TrackMonocular(image, timestamp, imuMeas);
+        return !system->isLost();
+    }
+    else
+    {
+        return false;
+    }
+}
 bool ORBSLAM3Python::processStereo(cv::Mat leftImage, cv::Mat rightImage, double timestamp)
 {
     if (!system)
@@ -123,6 +140,18 @@ std::vector<Eigen::Matrix4f> ORBSLAM3Python::getTrajectory() const
 PYBIND11_MODULE(orbslam3, m)
 {
     NDArrayConverter::init_numpy();
+    
+    // Add IMU namespace and Point class
+    py::module_ imu = m.def_submodule("IMU", "IMU related classes and functions");
+    
+    py::class_<ORB_SLAM3::IMU::Point>(imu, "Point")
+        .def(py::init<const float&, const float&, const float&,
+                     const float&, const float&, const float&,
+                     const double&>(),
+             py::arg("acc_x"), py::arg("acc_y"), py::arg("acc_z"),
+             py::arg("ang_vel_x"), py::arg("ang_vel_y"), py::arg("ang_vel_z"),
+             py::arg("timestamp"));
+
     py::enum_<ORB_SLAM3::Tracking::eTrackingState>(m, "TrackingState")
         .value("SYSTEM_NOT_READY", ORB_SLAM3::Tracking::eTrackingState::SYSTEM_NOT_READY)
         .value("NO_IMAGES_YET", ORB_SLAM3::Tracking::eTrackingState::NO_IMAGES_YET)
@@ -144,6 +173,7 @@ PYBIND11_MODULE(orbslam3, m)
         .def(py::init<std::string, std::string, ORB_SLAM3::System::eSensor>(), py::arg("vocab_file"), py::arg("settings_file"), py::arg("sensor_type"))
         .def("initialize", &ORBSLAM3Python::initialize)
         .def("process_image_mono", &ORBSLAM3Python::processMono, py::arg("image"), py::arg("time_stamp"))
+        .def("process_image_mono_inertial", &ORBSLAM3Python::processMonoInertial, py::arg("image"), py::arg("time_stamp"), py::arg("imu_meas"))
         .def("process_image_stereo", &ORBSLAM3Python::processStereo, py::arg("left_image"), py::arg("right_image"), py::arg("time_stamp"))
         .def("process_image_rgbd", &ORBSLAM3Python::processRGBD, py::arg("image"), py::arg("depth"), py::arg("time_stamp"))
         .def("shutdown", &ORBSLAM3Python::shutdown)

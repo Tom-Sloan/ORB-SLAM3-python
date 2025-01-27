@@ -14,6 +14,7 @@ public:
 
     bool initialize();
     bool processMono(cv::Mat image, double timestamp);
+    bool processMonoInertial(cv::Mat image, double timestamp, std::vector<ORB_SLAM3::IMU::Point> imuMeas);
     bool processStereo(cv::Mat leftImage, cv::Mat rightImage, double timestamp);
     bool processRGBD(cv::Mat image, cv::Mat depthImage, double timestamp);
     void reset();
