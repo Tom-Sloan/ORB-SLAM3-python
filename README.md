@@ -38,7 +38,14 @@ python demo/run_rgbd.py \
 ```bash
 python demo/run_rgbd.py \
     --vocab_file=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
-    --settings_file=third_party/ORB_SLAM3/Examples/RGB-D/TUM1.yaml \
+    --settings_file=third_party/ORB_SLAM3/Examples/Monocular/EuRoC.yaml \
+    --path_to_images=/home/sam3/Desktop/Toms_Workspace/LidarWorld_Server/recordings/20250128_091547/mav0/cam0
+```
+
+```bash
+python demo/run_rgbd.py \
+    --vocab_file=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
+    --settings_file=third_party/ORB_SLAM3/Examples/RGB-D/TUM.yaml \
     --path_to_images=/mnt/SSD_4T/TUM/rgbd_dataset_freiburg1_xyz/data
 ```
 

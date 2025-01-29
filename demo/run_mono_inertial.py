@@ -73,17 +73,30 @@ def main():
 
     # Initialize SLAM system
     slam = orbslam3.system(args.vocab_file, args.settings_file, orbslam3.Sensor.IMU_MONOCULAR)
+    slam.set_use_viewer(True)
     slam.initialize()
-
     prev_timestamp = None
     
+    # Create processed folder if it doesn't exist
+    processed_dir = os.path.join(os.path.dirname(image_files[0]), 'processed')
+    os.makedirs(processed_dir, exist_ok=True)
+
     # Process sequence
     for img_file, timestamp in zip(image_files, image_timestamps):
-        # Read image
-        img = cv2.imread(img_file, cv2.IMREAD_UNCHANGED)
-        
-        if img is None:
-            print(f"Failed to load image: {img_file}")
+        # Read image with better error handling
+        try:
+            img = cv2.imread(img_file, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                print(f"Failed to load image: {img_file}")
+                print(f"Checking if file exists: {os.path.exists(img_file)}")
+                print(f"File size: {os.path.getsize(img_file) if os.path.exists(img_file) else 'File not found'}")
+                continue
+                
+            # Print image properties for debugging
+            print(f"Loaded image shape: {img.shape}, dtype: {img.dtype}")
+            
+        except Exception as e:
+            print(f"Error loading image {img_file}: {str(e)}")
             continue
 
         # Get IMU measurements since last frame
@@ -97,14 +110,28 @@ def main():
         # Track frame
         tracked = slam.process_image_mono_inertial(img, timestamp, imu_measurements)
         print(f"Timestamp: {timestamp}, Tracking successful: {tracked}")
+        
+        if "Reseting active map" in str(tracked) or "Reset" in str(tracked):
+            print("Map reset detected")
+            continue
 
-        trajectory = slam.get_trajectory()
-        print(f"Number of poses: {len(trajectory)}")
+        # Only try to get trajectory if tracking was successful
+        if tracked and isinstance(tracked, bool):  # Make sure it's a boolean True
+            try:
+                trajectory = slam.get_trajectory()
+                if trajectory:  # Only print if we got a valid trajectory
+                    print(f"Current trajectory length: {len(trajectory)}")
+            except Exception as e:
+                print(f"Could not get trajectory: {e}")
+
+        # Move processed image to processed folder
+        processed_file = os.path.join(processed_dir, os.path.basename(img_file))
+        os.rename(img_file, processed_file)
 
         prev_timestamp = timestamp
-
+    
+    print("Done")
     # Shutdown SLAM system
-    slam.shutdown()
-
+    # slam.shutdown()
 if __name__ == '__main__':
     main()

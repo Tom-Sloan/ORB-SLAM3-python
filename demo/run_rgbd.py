@@ -4,6 +4,9 @@ import argparse
 from glob import glob
 import os 
 import cv2
+import numpy as np
+from multiprocessing import shared_memory
+import json
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--vocab_file", required=True)
@@ -11,27 +14,104 @@ parser.add_argument("--settings_file", required=True)
 parser.add_argument("--path_to_images", required=True)
 args = parser.parse_args()
 
+
 # Get all PNG files in the rgb/ subdirectory of the dataset path
 # - glob() finds all files matching the pattern 'rgb/*.png'
 # - os.path.join() combines dataset_path with 'rgb/*.png' using proper path separator
 # - sorted() ensures files are in alphabetical/numerical order
 # - Result is a list of full paths to all RGB image files
-img_files = sorted(glob(os.path.join(args.path_to_images, 'data/*.png')))
+img_files = sorted(glob(os.path.join(args.path_to_images, 'data/*.jpg')))
 slam = orbslam3.system(args.vocab_file, args.settings_file, orbslam3.Sensor.MONOCULAR)
-slam.set_use_viewer(False)
+slam.set_use_viewer(True)
 slam.initialize()
 
 start_time = time.time()
 frame_count = 0
 
-for img in img_files:
-    timestamp = img.split('/')[-1][:-4]
-    img = cv2.imread(img, -1)
-    pose = slam.process_image_mono(img, float(timestamp))
-    trajectory = slam.get_trajectory()
-    frame_count += 1
+processed_files = set()
+last_fps_print = time.time()
+frames_in_window = 0  # Track frames processed in current window
 
-elapsed_time = time.time() - start_time
-fps = frame_count / elapsed_time
-print(f"\nProcessed {frame_count} frames in {elapsed_time:.2f} seconds")
-print(f"Average FPS: {fps:.2f}")
+# Create shared memory for trajectory data
+MAX_POSES = 1000  # Maximum number of poses to store
+# Calculate correct buffer size:
+# - Each pose is 5x4 matrix of float64 (5*4*8 bytes)
+# - Total size = MAX_POSES * (5 * 4 * 8)
+POSE_SIZE = 5 * 4 * 8  # 5x4 matrix of float64
+shm = shared_memory.SharedMemory(create=True, size=MAX_POSES * POSE_SIZE, name='slam_trajectory')
+trajectory_array = np.ndarray((MAX_POSES, 5, 4), dtype=np.float64, buffer=shm.buf)
+trajectory_array.fill(0)  # Initialize with zeros
+
+# Create shared memory for metadata (current trajectory length and write position)
+shm_meta = shared_memory.SharedMemory(create=True, size=16, name='slam_trajectory_meta')
+meta_array = np.ndarray((2,), dtype=np.int64, buffer=shm_meta.buf)
+meta_array[0] = 0  # number of poses
+meta_array[1] = 0  # write position
+
+try:
+    while True:
+        # Get current image files
+        current_files = set(glob(os.path.join(args.path_to_images, 'data/*.jpg')))
+        
+        # Process new files
+        new_files = current_files - processed_files
+        for img_path in sorted(new_files):
+            timestamp = img_path.split('/')[-1][:-4]
+            img = cv2.imread(img_path, -1)
+            if img is not None:
+                pose = slam.process_image_mono(img, float(timestamp))
+                trajectory = slam.get_trajectory()
+                
+                # Update trajectory in shared memory
+                if trajectory is not None and len(trajectory) > 0:
+                    # Get write position
+                    write_pos = meta_array[1]
+                    
+                    # Write new pose
+                    trajectory_array[write_pos, :4, :] = trajectory[-1]  # Store latest pose
+                    trajectory_array[write_pos, 4, 0] = float(timestamp)
+                    
+                    # Update write position
+                    write_pos = (write_pos + 1) % MAX_POSES
+                    meta_array[1] = write_pos
+                    
+                    # Update number of poses
+                    meta_array[0] = min(meta_array[0] + 1, MAX_POSES)
+                
+                frame_count += 1
+                frames_in_window += 1
+                processed_files.add(img_path)
+
+        # Print FPS stats every 10 seconds if new frames were processed
+        current_time = time.time()
+        if current_time - last_fps_print >= 10 and frames_in_window > 0:
+            window_time = current_time - last_fps_print
+            fps = frames_in_window / window_time
+            print(f"\nProcessed {frames_in_window} frames in last {window_time:.2f} seconds")
+            print(f"Current FPS: {fps:.2f}")
+            last_fps_print = current_time
+            frames_in_window = 0  # Reset counter for next window
+
+        # Small sleep to prevent excessive CPU usage
+        time.sleep(0.01)
+
+except Exception as e:
+    print(f"Error occurred: {e}")
+    try:
+        shm.close()
+        shm_meta.close()
+        shm.unlink()
+        shm_meta.unlink()
+    except FileNotFoundError:
+        pass
+    raise
+finally:
+    # Clean up shared memory
+    print("Cleaning up shared memory...")
+    try:
+        shm.close()
+        shm_meta.close()
+        shm.unlink()
+        shm_meta.unlink()
+    except FileNotFoundError:
+        pass
