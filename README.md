@@ -1,4 +1,4 @@
-ORB-SLAM3-PYTHON
+# ORB-SLAM3-PYTHON
 ===
 
 Python bindings generated using [pybind11](https://pybind11.readthedocs.io/en/stable/). We use a modified version of ORB-SLAM3 (included as a submodule) to exntend interfaces. It might not be the most up-to-date with the original ORB-SLAM3.
@@ -20,7 +20,7 @@ Python bindings generated using [pybind11](https://pybind11.readthedocs.io/en/st
 1. Clone the repo with `--recursive`
 2. Install `Eigen`, `Pangolin` and `OpenCV` if you havn't already.
 3. `ORB-SLAM3` requires `openssl` to be installed: `sudo apt-get install libssl-dev`
-4. Install some pip packages: `pip install pillow pyparsing pytz six`
+4. Install some pip packages: `pip install pillow pyparsing pytz six watchdog`
 5. Run `python setup install` or `pip install .`.
 6. Please raise an issue if you run into any.
 
@@ -29,24 +29,7 @@ Python bindings generated using [pybind11](https://pybind11.readthedocs.io/en/st
 Please see the demo at `demo/run_rgb.py` for how to use this code. For example, you can run this demo with (by substituting the appropriate arguments):
 
 ```bash
-python demo/run_rgbd.py \
-    --vocab_file=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
-    --settings_file=third_party/ORB_SLAM3/Examples/Monocular/EuRoC.yaml \
-    --path_to_images=/mnt/SSD_4T/EuRoC/MH01/mav0/cam0
-```
-
-```bash
-python demo/run_rgbd.py \
-    --vocab_file=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
-    --settings_file=third_party/ORB_SLAM3/Examples/Monocular/EuRoC.yaml \
-    --path_to_images=/home/sam3/Desktop/Toms_Workspace/LidarWorld_Server/recordings/20250128_091547/mav0/cam0
-```
-
-```bash
-python demo/run_rgbd.py \
-    --vocab_file=third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt \
-    --settings_file=third_party/ORB_SLAM3/Examples/RGB-D/TUM.yaml \
-    --path_to_images=/mnt/SSD_4T/TUM/rgbd_dataset_freiburg1_xyz/data
+python demo/run_rgb.py /home/sam3/Desktop/Toms_Workspace/LidarWorld_Server/recordings/ --vocab_file=./Vocabulary/ORBvoc.txt
 ```
 
 ```bash
