@@ -112,8 +112,8 @@ def main():
         try:
             shm.close()
             shm_meta.close()
-            shm.unlink()
-            shm_meta.unlink()
+            # shm.unlink()
+            # shm_meta.unlink()
         except FileNotFoundError:
             pass
         raise
@@ -123,8 +123,8 @@ def main():
         try:
             shm.close()
             shm_meta.close()
-            shm.unlink()
-            shm_meta.unlink()
+            # shm.unlink()
+            # shm_meta.unlink()
         except FileNotFoundError:
             pass
 
