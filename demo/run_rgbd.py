@@ -27,7 +27,7 @@ def main():
 
     # Initialize SLAM system
     slam = orbslam3.system(args.vocab_file, settings_file, orbslam3.Sensor.MONOCULAR)
-    slam.set_use_viewer(True)
+    # slam.set_use_viewer(True)
     slam.initialize()
 
     # Get all PNG files in the rgb/ subdirectory of the dataset path

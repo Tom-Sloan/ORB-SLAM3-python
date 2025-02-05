@@ -26,7 +26,7 @@ class CMakeBuild(build_ext):
             f"-DCMAKE_LIBRARY_OUTPUT_DIRECTORY={extdir}",
             f"-DPYTHON_EXECUTABLE={sys.executable}",
             f"-DCMAKE_BUILD_TYPE=Release",
-            f"-DCMAKE_CXX_FLAGS='-I {np.get_include()}'"
+            f"-DCMAKE_CXX_FLAGS='-I {np.get_include()} -Wno-deprecated-declarations -Wno-maybe-uninitialized'"
         ]
 
         subprocess.check_call(

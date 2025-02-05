@@ -4,3 +4,10 @@ outputs/
 examples/
 dist/
 __pycache__
+data/
+*.log
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.model

@@ -31,6 +31,10 @@ Please see the demo at `demo/run_rgb.py` for how to use this code. For example, 
 ```bash
 python demo/run_rgb.py /home/sam3/Desktop/Toms_Workspace/LidarWorld_Server/recordings/ --vocab_file=./Vocabulary/ORBvoc.txt
 ```
+### In docker container
+```bash
+python3 demo/run_rgbd.py ../data/recordings/20250130_130942 --vocab_file=./third_party/ORB_SLAM3/Vocabulary/ORBvoc.txt
+```
 
 ```bash
 python demo/run_mono_inertial.py \
