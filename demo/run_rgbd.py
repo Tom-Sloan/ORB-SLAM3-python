@@ -7,11 +7,11 @@ import cv2
 import numpy as np
 from multiprocessing import shared_memory
 import json
-
+import tarfile
 def main():
     parser = argparse.ArgumentParser(description="Run ORB-SLAM3 Monocular with shared memory")
     parser.add_argument("recording_dir", help="Path to recording directory (e.g., /path/to/20250128_193743)")
-    parser.add_argument("--vocab_file", default="./Vocabulary/ORBvoc.txt", help="Path to ORB-SLAM3 vocabulary file")
+    parser.add_argument("--third_party_path", default="./third_party", help="Path to ORB-SLAM3 third party directory")
     args = parser.parse_args()
 
     # Construct paths based on standard directory structure
@@ -24,9 +24,24 @@ def main():
     for path in [mav0_dir, image_dir, settings_file]:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Required path not found: {path}")
+        
+    # Extract ORB vocabulary
+    vocab_file = os.path.join(args.third_party_path, "ORB_SLAM3/Vocabulary/ORBvoc.txt")
+    if not os.path.exists(vocab_file):
+        vocab_file_tar = os.path.join(args.third_party_path, "ORB_SLAM3/Vocabulary/ORBvoc.txt.tar.gz")
+        if not os.path.exists(vocab_file_tar):
+            raise FileNotFoundError(f"Required path not found: {vocab_file_tar}")
+        else:
+            # Extract ORB vocabulary
+            with tarfile.open(vocab_file_tar, 'r:gz') as tar:
+                tar.extractall(path=args.third_party_path)
+                if not os.path.exists(vocab_file):
+                    raise FileNotFoundError(f"Failed to extract ORB vocabulary to {args.third_party_path}")
+                else:
+                    print(f"Extracted ORB vocabulary to {args.third_party_path}")
 
     # Initialize SLAM system
-    slam = orbslam3.system(args.vocab_file, settings_file, orbslam3.Sensor.MONOCULAR)
+    slam = orbslam3.system(vocab_file, settings_file, orbslam3.Sensor.MONOCULAR)
     # slam.set_use_viewer(True)
     slam.initialize()
 

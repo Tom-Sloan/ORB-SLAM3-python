@@ -70,31 +70,29 @@ RUN cd /tmp && git clone https://github.com/stevenlovegrove/Pangolin && \
     cd / && rm -rf /tmp/Pangolin
 
 # Set working directory
-WORKDIR /app
-COPY ./third_party /app/third_party
+WORKDIR /copy
+COPY . .
 
 # # Build ORB_SLAM3 dependencies
-RUN cd /app/third_party/ORB_SLAM3/Thirdparty/DBoW2 && \
+RUN cd /copy/third_party/ORB_SLAM3/Thirdparty/DBoW2 && \
 rm -rf build && mkdir build && cd build && \
 cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations -Wno-maybe-uninitialized" .. && \
 make -j8
 
-RUN cd /app/third_party/ORB_SLAM3/Thirdparty/g2o && \
+RUN cd /copy/third_party/ORB_SLAM3/Thirdparty/g2o && \
 rm -rf build && mkdir build && cd build && \
 cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations -Wno-maybe-uninitialized" .. && \
 make -j8
 
-RUN cd /app/third_party/ORB_SLAM3/Thirdparty/Sophus && \
+RUN cd /copy/third_party/ORB_SLAM3/Thirdparty/Sophus && \
 rm -rf build && mkdir build && cd build && \
 cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations -Wno-maybe-uninitialized" .. && \
 make -j8
-
-# # Extract ORB vocabulary
-RUN cd /app/third_party/ORB_SLAM3/Vocabulary && \
-tar -xf ORBvoc.txt.tar.gz
 
 # # Install Python bindings
 RUN pip3 install .
+
+WORKDIR /app
 
 ARG USERNAME
 ARG UID
@@ -112,6 +110,5 @@ RUN echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 # Set the default user to the new user
 USER $USERNAME
 RUN echo "*customization: -color" > $HOME/.Xdefaults
-WORKDIR /app
 
 CMD ["/bin/bash"]
