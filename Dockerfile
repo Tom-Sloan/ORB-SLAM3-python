@@ -92,7 +92,7 @@ make -j8
 RUN pip3 install .
 
 # Install Python dependencies
-RUN pip3 install pillow pyparsing pytz six watchdog aio-pika pika
+RUN pip3 install pillow pyparsing pytz six watchdog aio-pika pika opencv-python-headless
 WORKDIR /app
 
 ARG USERNAME
@@ -112,4 +112,4 @@ RUN echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 USER $USERNAME
 RUN echo "*customization: -color" > $HOME/.Xdefaults
 
-CMD ["/bin/bash"]
+CMD ["python3", "./demo/run_rgbd.py"] 

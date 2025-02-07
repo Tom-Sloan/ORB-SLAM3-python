@@ -1,187 +1,277 @@
+#!/usr/bin/env python3
+"""
+run_rgbd.py
+-----------
+Continuously listens for images (and optionally IMU data) from RabbitMQ queues, 
+runs ORB-SLAM3 in either monocular or mono-inertial mode, 
+and publishes resulting trajectory poses to a fanout exchange 'trajectory_exchange'.
+
+Requires:
+  pip install pika opencv-python-headless numpy orbslam3 (plus your other dependencies)
+
+Environment:
+  RABBITMQ_URL=amqp://rabbitmq  # or similar
+  SLAM_MODE=mono or mono_inertial
+  (or pass '--mode mono'/'--mode mono_inertial' as a command-line arg)
+"""
+
+import os
+import sys
+import json
 import time
-import orbslam3
-import argparse
-from glob import glob
-import os 
 import cv2
 import numpy as np
-from multiprocessing import shared_memory
-import json
-import tarfile
 import pika
-import aio_pika
+import argparse
+import base64
 
-def main():
-    parser = argparse.ArgumentParser(description="Run ORB-SLAM3 Monocular with shared memory")
-    parser.add_argument("recording_dir", help="Path to recording directory (e.g., /path/to/20250128_193743)")
-    parser.add_argument("--third_party_path", default="./third_party", help="Path to ORB-SLAM3 third party directory")
-    args = parser.parse_args()
+# If you have orbslam3 installed as a Python module:
+import orbslam3
 
-    # Construct paths based on standard directory structure
-    print(args.recording_dir)
-    mav0_dir = os.path.join(args.recording_dir, "mav0")
-    image_dir = os.path.join(mav0_dir, "cam0", "data")
-    settings_file = os.path.join(mav0_dir, "EuRoC_mono.yaml")
-    print("settings_file", settings_file)
-    # Verify paths exist
-    for path in [mav0_dir, image_dir, settings_file]:
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Required path not found: {path}")
-        
-    # Extract ORB vocabulary
-    vocab_file = os.path.join(args.third_party_path, "ORB_SLAM3/Vocabulary/ORBvoc.txt")
-    if not os.path.exists(vocab_file):
-        vocab_file_tar = os.path.join(args.third_party_path, "ORB_SLAM3/Vocabulary/ORBvoc.txt.tar.gz")
-        if not os.path.exists(vocab_file_tar):
-            raise FileNotFoundError(f"Required path not found: {vocab_file_tar}")
-        else:
-            # Extract ORB vocabulary
-            with tarfile.open(vocab_file_tar, 'r:gz') as tar:
-                tar.extractall(path=args.third_party_path)
-                if not os.path.exists(vocab_file):
-                    raise FileNotFoundError(f"Failed to extract ORB vocabulary to {args.third_party_path}")
-                else:
-                    print(f"Extracted ORB vocabulary to {args.third_party_path}")
 
-    # Initialize SLAM system
-    slam = orbslam3.system(vocab_file, settings_file, orbslam3.Sensor.MONOCULAR)
-    # slam.set_use_viewer(True)
+def load_slam_system(slam_mode: str):
+    """
+    Initialize ORB-SLAM3 in the chosen mode ('mono' or 'mono_inertial')
+    using local config files in the same folder as run_rgbd.py.
+    """
+    this_dir = os.path.dirname(os.path.abspath(__file__))
+
+    # Adjust these as needed or rename them in your project
+    mono_config = os.path.join(this_dir, "EuRoC_mono.yaml")
+    inertial_config = os.path.join(this_dir, "EuRoC_mono_inertial.yaml")
+
+    # Path to ORB vocabulary
+    # (In real usage, ensure your ORBvoc.txt or .bin is here)
+    vocabulary_path = os.path.join('third_party/ORB_SLAM3/Vocabulary/', "ORBvoc.txt")
+    if not os.path.exists(vocabulary_path):
+        # If it's not in the same folder, adapt accordingly
+        raise FileNotFoundError(f"ORB vocabulary file not found: {vocabulary_path}")
+
+    if slam_mode == "mono":
+        slam = orbslam3.system(
+            vocabulary_path,
+            mono_config,
+            orbslam3.Sensor.MONOCULAR
+        )
+    elif slam_mode == "mono_inertial":
+        slam = orbslam3.system(
+            vocabulary_path,
+            inertial_config,
+            orbslam3.Sensor.IMU_MONOCULAR
+        )
+    else:
+        raise ValueError(f"Unknown SLAM mode: {slam_mode}")
+
     slam.initialize()
+    return slam
 
-    # Get all PNG files in the rgb/ subdirectory of the dataset path
-    # - glob() finds all files matching the pattern 'rgb/*.png'
-    # - os.path.join() combines dataset_path with 'rgb/*.png' using proper path separator
-    # - sorted() ensures files are in alphabetical/numerical order
-    # - Result is a list of full paths to all RGB image files
-    img_files = sorted(glob(os.path.join(image_dir, '*.jpg')))
 
-    start_time = time.time()
-    frame_count = 0
+class RunRGBD:
+    """
+    Example SLAM processor that:
+     - Subscribes to image_data_exchange (and optional IMU)
+     - Runs ORB-SLAM3 in either monocular or mono-inertial mode
+     - Publishes resulting trajectory to a new fanout exchange ('trajectory_exchange').
+    """
 
-    processed_files = set()
-    last_fps_print = time.time()
-    frames_in_window = 0  # Track frames processed in current window
+    def __init__(self, slam_mode="mono"):
+        self.slam_mode = slam_mode
 
-    # Create shared memory for trajectory data
-    MAX_POSES = 1000  # Maximum number of poses to store
-    # Calculate correct buffer size:
-    # - Each pose is 5x4 matrix of float64 (5*4*8 bytes)
-    # - Total size = MAX_POSES * (5 * 4 * 8)
-    POSE_SIZE = 5 * 4 * 8  # 5x4 matrix of float64
-    shm = shared_memory.SharedMemory(create=True, size=MAX_POSES * POSE_SIZE, name='slam_trajectory')
-    trajectory_array = np.ndarray((MAX_POSES, 5, 4), dtype=np.float64, buffer=shm.buf)
-    trajectory_array.fill(0)  # Initialize with zeros
+        # We store images + IMU in memory if we need to unify them.
+        # For a real solution, you'd want a more robust approach (timestamp matching, etc.).
+        self.imu_buffer = []
+        self.slam = load_slam_system(self.slam_mode)
 
-    # Create shared memory for metadata (current trajectory length and write position)
-    shm_meta = shared_memory.SharedMemory(create=True, size=16, name='slam_trajectory_meta')
-    meta_array = np.ndarray((2,), dtype=np.int64, buffer=shm_meta.buf)
-    meta_array[0] = 0  # number of poses
-    meta_array[1] = 0  # write position
-
-    try:
-        while True:
-            # Get current image files
-            current_files = set(glob(os.path.join(image_dir, '*.jpg')))
-            
-            # Process new files
-            new_files = current_files - processed_files
-            for img_path in sorted(new_files):
-                timestamp = img_path.split('/')[-1][:-4]
-                img = cv2.imread(img_path, -1)
-                if img is not None:
-                    pose = slam.process_image_mono(img, float(timestamp))
-                    trajectory = slam.get_trajectory()
-                    
-                    # Update trajectory in shared memory
-                    if trajectory is not None and len(trajectory) > 0:
-                        # Get write position
-                        write_pos = meta_array[1]
-                        
-                        # Write new pose
-                        trajectory_array[write_pos, :4, :] = trajectory[-1]  # Store latest pose
-                        trajectory_array[write_pos, 4, 0] = float(timestamp)
-                        
-                        # Update write position
-                        write_pos = (write_pos + 1) % MAX_POSES
-                        meta_array[1] = write_pos
-                        
-                        # Update number of poses
-                        meta_array[0] = min(meta_array[0] + 1, MAX_POSES)
-                    
-                    frame_count += 1
-                    frames_in_window += 1
-                    processed_files.add(img_path)
-
-            # Print FPS stats every 10 seconds if new frames were processed
-            current_time = time.time()
-            if current_time - last_fps_print >= 10 and frames_in_window > 0:
-                window_time = current_time - last_fps_print
-                fps = frames_in_window / window_time
-                print(f"\nProcessed {frames_in_window} frames in last {window_time:.2f} seconds")
-                print(f"Current FPS: {fps:.2f}")
-                last_fps_print = current_time
-                frames_in_window = 0  # Reset counter for next window
-
-            # Small sleep to prevent excessive CPU usage
-            time.sleep(0.01)
-
-    except Exception as e:
-        print(f"Error occurred: {e}")
-        try:
-            shm.close()
-            shm_meta.close()
-            # shm.unlink()
-            # shm_meta.unlink()
-        except FileNotFoundError:
-            pass
-        raise
-    finally:
-        # Clean up shared memory
-        print("Cleaning up shared memory...")
-        try:
-            shm.close()
-            shm_meta.close()
-            # shm.unlink()
-            # shm_meta.unlink()
-        except FileNotFoundError:
-            pass
-
-async def process_images():
-    connection = await aio_pika.connect(os.getenv('RABBITMQ_URL'))
-    channel = await connection.channel()
-    queue = await channel.declare_queue('image_data')
-    
-    async for message in queue:
-        async with message.process():
-            data = json.loads(message.body)
-            # Process frame with SLAM
-            pose = slam.process_image_mono(cv2.imdecode(data['frame']))
-            # Publish pose to trajectory queue
-
-class SLAMProcessor:
-    def __init__(self):
-        self.connection = pika.BlockingConnection(
-            pika.URLParameters(os.getenv('RABBITMQ_URL')))
+        # ---- Setup RabbitMQ Connection ----
+        amqp_url = os.getenv("RABBITMQ_URL", "amqp://rabbitmq")
+        params = pika.URLParameters(amqp_url)
+        params.heartbeat = 3600  # 1-hour heartbeat
+        self.connection = pika.BlockingConnection(params)
         self.channel = self.connection.channel()
-        self.channel.queue_declare(queue='image_data')
-        self.channel.queue_declare(queue='imu_data')
-        
-    def process_messages(self):
-        def callback(ch, method, properties, body):
-            data = json.loads(body)
-            # Process frame with SLAM
-            pose = self.slam.process_image_mono(data['frame'], data['timestamp'])
-            # Publish trajectory updates
-            ch.basic_publish(
-                exchange='',
-                routing_key='trajectory_updates',
-                body=json.dumps(pose.tolist()))
-            
+
+        # We will create unique queues for this consumer and bind them to the fanout exchanges
+        # that 'frame_processor.py' is publishing to.
+        # image_data_exchange -> image_data_slam queue
+        # imu_data_exchange   -> imu_data_slam queue  (only if we are in mono_inertial mode)
+
+        # 1) Declare fanout exchange (already done by publisher, but safe to re-declare):
+        self.channel.exchange_declare(
+            exchange='image_data_exchange',
+            exchange_type='fanout',
+            durable=True
+        )
+        self.channel.exchange_declare(
+            exchange='imu_data_exchange',
+            exchange_type='fanout',
+            durable=True
+        )
+
+        # 2) Declare a queue for images
+        res_image = self.channel.queue_declare(queue='', exclusive=True)  # let Rabbit pick name
+        self.image_queue = res_image.method.queue
+        # Bind it
+        self.channel.queue_bind(
+            exchange='image_data_exchange',
+            queue=self.image_queue,
+            routing_key=''
+        )
+
+        self.imu_queue = None
+        if self.slam_mode == "mono_inertial":
+            res_imu = self.channel.queue_declare(queue='', exclusive=True)  # ephemeral queue
+            self.imu_queue = res_imu.method.queue
+            # Bind it
+            self.channel.queue_bind(
+                exchange='imu_data_exchange',
+                queue=self.imu_queue,
+                routing_key=''
+            )
+
+        # 3) Declare a new fanout exchange to publish trajectory updates
+        # (multiple subscribers can read from it)
+        self.channel.exchange_declare(
+            exchange='trajectory_data_exchange',
+            exchange_type='fanout',
+            durable=True
+        )
+
+        # 4) Set up consumers
         self.channel.basic_consume(
-            queue='image_data',
-            on_message_callback=callback,
-            auto_ack=True)
-        self.channel.start_consuming()
+            queue=self.image_queue,
+            on_message_callback=self.on_image_message,
+            auto_ack=True
+        )
+
+        if self.imu_queue:
+            self.channel.basic_consume(
+                queue=self.imu_queue,
+                on_message_callback=self.on_imu_message,
+                auto_ack=True
+            )
+
+        print(f" [*] Subscribed to fanout exchange(s) in mode={self.slam_mode}")
+        print(f"     Image queue: {self.image_queue}")
+        if self.imu_queue:
+            print(f"     IMU queue:   {self.imu_queue}")
+
+    def on_image_message(self, ch, method, properties, body):
+        """
+        Callback for image messages from 'image_data_exchange'.
+        Each message includes 'frame_data' (base64 image) and 'timestamp'.
+        """
+        try:
+            data = json.loads(body)
+            frame_b64 = data['frame_data']
+            frame_ts_ns = data['timestamp']  # e.g. 1234567890123456
+
+            # Convert base64 -> image
+            frame_bytes = cv2.imdecode(
+                np.frombuffer(
+                    base64.b64decode(frame_b64),
+                    np.uint8
+                ),
+                cv2.IMREAD_COLOR
+            )
+            if frame_bytes is None:
+                print(" [!] Received invalid image frame.")
+                return
+
+            # Convert timestamp from ns to seconds
+            frame_ts_s = frame_ts_ns / 1e9
+
+            # For a real solution, you'd gather all IMU up to 'frame_ts_s'
+            # for mono_inertial. We'll do a naive approach, ignoring partial sync.
+            if self.slam_mode == "mono_inertial":
+                # We may want to collect IMU from self.imu_buffer that is <= frame_ts_s
+                # to pass into slam
+                # For demonstration, let's pass all
+                imu_measurements = self.imu_buffer[:]
+                self.imu_buffer.clear()
+
+                # Call ORB-SLAM
+                success = self.slam.process_image_mono_inertial(frame_bytes, frame_ts_s, imu_measurements)
+            else:
+                # Monocular only
+                success = self.slam.process_image_mono(frame_bytes, frame_ts_s)
+
+            # Extract the current pose from get_trajectory() or from the returned pose
+            current_pose = None
+            if success:
+                # Some versions of orbslam3 Python wrapper return a matrix, or you might do:
+                current_pose = self.slam.get_trajectory()[-1]
+            else:
+                # or you might call self.slam.get_trajectory(), etc.
+                pass
+            
+            last_pose = self.slam.get_trajectory()  # returns the entire list of poses
+            if last_pose and len(last_pose) > 0:
+                # Grab the last pose only
+                pose = last_pose[-1]
+                if isinstance(pose, np.ndarray):
+                    pose_list = pose.tolist()
+                else:
+                    pose_list = pose
+
+                msg = {
+                    "timestamp_ns": frame_ts_ns,  # or you can store the current time
+                    "pose": pose_list
+                }
+                self.channel.basic_publish(
+                    exchange='trajectory_data_exchange',
+                    routing_key='',
+                    body=json.dumps(msg)
+                )
+                print(f"Published LATEST pose at {frame_ts_ns} ns")
+
+        except Exception as e:
+            print(f"Error in on_image_message: {e}")
+
+    def on_imu_message(self, ch, method, properties, body):
+        """
+        Callback for IMU messages from 'imu_data_exchange'.
+        data includes 'timestamp' (ns), 'angular_velocity', 'linear_acceleration'
+        """
+        try:
+            data = json.loads(body)
+            imu_ts_ns = data['timestamp']
+            gyro = data['angular_velocity']   # [gx, gy, gz]
+            accel = data['linear_acceleration']  # [ax, ay, az]
+
+            # Convert to orbslam3.IMU.Point if your orbslam3 binding requires that
+            # We'll store in a simple dict for demonstration
+            imu_point = {
+                "timestamp_s": imu_ts_ns / 1e9,
+                "gyro": gyro,
+                "accel": accel
+            }
+            # Append to buffer
+            self.imu_buffer.append(imu_point)
+
+        except Exception as e:
+            print(f"Error in on_imu_message: {e}")
+
+    def run_forever(self):
+        """
+        Start consuming from queues forever. This call is blocking.
+        """
+        print(" [*] Starting blocking consume. Press Ctrl+C to stop.")
+        try:
+            self.channel.start_consuming()
+        except KeyboardInterrupt:
+            print("\n [x] Interrupted by user")
+
+        # Clean up
+        self.slam.shutdown()
+        self.connection.close()
+
 
 if __name__ == "__main__":
-    main()
+    # Allow user to pass --mode mono or --mode mono_inertial
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", default=os.getenv("SLAM_MODE", "mono"),
+                        choices=["mono", "mono_inertial"],
+                        help="SLAM mode to run: 'mono' or 'mono_inertial'")
+    args = parser.parse_args()
+
+    node = RunRGBD(slam_mode=args.mode)
+    node.run_forever()
