@@ -47,8 +47,6 @@ RUN apt-get install -y libgstreamer-plugins-base1.0-dev libgstreamer1.0-dev
 RUN apt-get install -y libgtk-3-dev
 RUN apt-get install -y libssl-dev
 
-# Install Python dependencies
-RUN pip3 install pillow pyparsing pytz six watchdog pika
 
 RUN apt-get update && apt-get install -y \
     libboost-serialization-dev \
@@ -89,9 +87,12 @@ rm -rf build && mkdir build && cd build && \
 cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wno-deprecated-declarations -Wno-maybe-uninitialized" .. && \
 make -j8
 
+
 # # Install Python bindings
 RUN pip3 install .
 
+# Install Python dependencies
+RUN pip3 install pillow pyparsing pytz six watchdog aio-pika pika
 WORKDIR /app
 
 ARG USERNAME

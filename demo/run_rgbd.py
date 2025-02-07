@@ -8,6 +8,9 @@ import numpy as np
 from multiprocessing import shared_memory
 import json
 import tarfile
+import pika
+import aio_pika
+
 def main():
     parser = argparse.ArgumentParser(description="Run ORB-SLAM3 Monocular with shared memory")
     parser.add_argument("recording_dir", help="Path to recording directory (e.g., /path/to/20250128_193743)")
@@ -142,6 +145,43 @@ def main():
             # shm_meta.unlink()
         except FileNotFoundError:
             pass
+
+async def process_images():
+    connection = await aio_pika.connect(os.getenv('RABBITMQ_URL'))
+    channel = await connection.channel()
+    queue = await channel.declare_queue('image_data')
+    
+    async for message in queue:
+        async with message.process():
+            data = json.loads(message.body)
+            # Process frame with SLAM
+            pose = slam.process_image_mono(cv2.imdecode(data['frame']))
+            # Publish pose to trajectory queue
+
+class SLAMProcessor:
+    def __init__(self):
+        self.connection = pika.BlockingConnection(
+            pika.URLParameters(os.getenv('RABBITMQ_URL')))
+        self.channel = self.connection.channel()
+        self.channel.queue_declare(queue='image_data')
+        self.channel.queue_declare(queue='imu_data')
+        
+    def process_messages(self):
+        def callback(ch, method, properties, body):
+            data = json.loads(body)
+            # Process frame with SLAM
+            pose = self.slam.process_image_mono(data['frame'], data['timestamp'])
+            # Publish trajectory updates
+            ch.basic_publish(
+                exchange='',
+                routing_key='trajectory_updates',
+                body=json.dumps(pose.tolist()))
+            
+        self.channel.basic_consume(
+            queue='image_data',
+            on_message_callback=callback,
+            auto_ack=True)
+        self.channel.start_consuming()
 
 if __name__ == "__main__":
     main()
