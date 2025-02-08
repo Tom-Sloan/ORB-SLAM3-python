@@ -28,6 +28,27 @@ import base64
 # If you have orbslam3 installed as a Python module:
 import orbslam3
 
+# PROMETHEUS
+from prometheus_client import start_http_server, Counter, Histogram, Gauge
+
+# Define metrics
+slam_frames_processed = Counter(
+    "slam_frames_processed_total",
+    "Number of frames processed by the SLAM system"
+)
+
+slam_frame_latency = Histogram(
+    "slam_frame_processing_seconds",
+    "Time spent processing each frame in SLAM",
+    buckets=[0.01, 0.05, 0.1, 0.5, 1, 2, 5]
+)
+
+slam_fps_gauge = Gauge(
+    "slam_frames_per_second",
+    "Frames per second of the SLAM pipeline"
+)
+
+
 
 def load_slam_system(slam_mode: str):
     """
@@ -78,7 +99,6 @@ class RunRGBD:
         self.slam_mode = slam_mode
 
         # We store images + IMU in memory if we need to unify them.
-        # For a real solution, you'd want a more robust approach (timestamp matching, etc.).
         self.imu_buffer = []
         self.slam = load_slam_system(self.slam_mode)
 
@@ -159,6 +179,7 @@ class RunRGBD:
         Callback for image messages from 'image_data_exchange'.
         Each message includes 'frame_data' (base64 image) and 'timestamp'.
         """
+        start_time = time.time()
         try:
             data = json.loads(body)
             frame_b64 = data['frame_data']
@@ -182,9 +203,6 @@ class RunRGBD:
             # For a real solution, you'd gather all IMU up to 'frame_ts_s'
             # for mono_inertial. We'll do a naive approach, ignoring partial sync.
             if self.slam_mode == "mono_inertial":
-                # We may want to collect IMU from self.imu_buffer that is <= frame_ts_s
-                # to pass into slam
-                # For demonstration, let's pass all
                 imu_measurements = self.imu_buffer[:]
                 self.imu_buffer.clear()
 
@@ -194,37 +212,40 @@ class RunRGBD:
                 # Monocular only
                 success = self.slam.process_image_mono(frame_bytes, frame_ts_s)
 
-            # Extract the current pose from get_trajectory() or from the returned pose
-            current_pose = None
-            if success:
-                # Some versions of orbslam3 Python wrapper return a matrix, or you might do:
-                current_pose = self.slam.get_trajectory()[-1]
-            else:
-                # or you might call self.slam.get_trajectory(), etc.
-                pass
-            
-            last_pose = self.slam.get_trajectory()  # returns the entire list of poses
-            if last_pose and len(last_pose) > 0:
-                # Grab the last pose only
-                pose = last_pose[-1]
-                if isinstance(pose, np.ndarray):
-                    pose_list = pose.tolist()
-                else:
-                    pose_list = pose
+            # Update metrics: frames processed
+            slam_frames_processed.inc()
 
-                msg = {
-                    "timestamp_ns": frame_ts_ns,  # or you can store the current time
-                    "pose": pose_list
-                }
-                self.channel.basic_publish(
-                    exchange='trajectory_data_exchange',
-                    routing_key='',
-                    body=json.dumps(msg)
-                )
-                print(f"Published LATEST pose at {frame_ts_ns} ns")
+            # measure time
+            elapsed = time.time() - start_time
+            slam_frame_latency.observe(elapsed)
+
+            # If you want a rough FPS, you can do 1/elapsed for each frame
+            # but be aware it's noisy frame-by-frame. This is a naive approach:
+            slam_fps_gauge.set(1.0 / elapsed if elapsed > 0 else 0.0)
+
+            # Publish trajectory if we have a valid pose
+            if success:
+                last_pose = self.slam.get_trajectory()
+                if last_pose and len(last_pose) > 0:
+                    pose = last_pose[-1]
+                    if isinstance(pose, np.ndarray):
+                        pose_list = pose.tolist()
+                    else:
+                        pose_list = pose
+                    msg = {
+                        "timestamp_ns": frame_ts_ns,
+                        "pose": pose_list
+                    }
+                    self.channel.basic_publish(
+                        exchange='trajectory_data_exchange',
+                        routing_key='',
+                        body=json.dumps(msg)
+                    )
+                    print(f"Published LATEST pose at {frame_ts_ns} ns")
 
         except Exception as e:
             print(f"Error in on_image_message: {e}")
+
 
     def on_imu_message(self, ch, method, properties, body):
         """
@@ -266,7 +287,7 @@ class RunRGBD:
 
 
 if __name__ == "__main__":
-    # Allow user to pass --mode mono or --mode mono_inertial
+    start_http_server(8000)
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", default=os.getenv("SLAM_MODE", "mono"),
                         choices=["mono", "mono_inertial"],
