@@ -48,7 +48,11 @@ slam_fps_gauge = Gauge(
     "Frames per second of the SLAM pipeline"
 )
 
-
+# Get exchange names from the environment
+VIDEO_FRAMES_EXCHANGE = os.getenv("VIDEO_FRAMES_EXCHANGE", "video_frames_exchange")
+IMU_DATA_EXCHANGE = os.getenv("IMU_DATA_EXCHANGE", "imu_data_exchange")
+TRAJECTORY_DATA_EXCHANGE = os.getenv("TRAJECTORY_DATA_EXCHANGE", "trajectory_data_exchange")
+RESTART_EXCHANGE = os.getenv("RESTART_EXCHANGE", "restart_exchange")
 
 def load_slam_system(slam_mode: str):
     """
@@ -62,10 +66,8 @@ def load_slam_system(slam_mode: str):
     inertial_config = os.path.join(this_dir, "EuRoC_mono_inertial.yaml")
 
     # Path to ORB vocabulary
-    # (In real usage, ensure your ORBvoc.txt or .bin is here)
     vocabulary_path = os.path.join('third_party/ORB_SLAM3/Vocabulary/', "ORBvoc.txt")
     if not os.path.exists(vocabulary_path):
-        # If it's not in the same folder, adapt accordingly
         raise FileNotFoundError(f"ORB vocabulary file not found: {vocabulary_path}")
 
     if slam_mode == "mono":
@@ -109,48 +111,40 @@ class RunRGBD:
         self.connection = pika.BlockingConnection(params)
         self.channel = self.connection.channel()
 
-        # We will create unique queues for this consumer and bind them to the fanout exchanges
-        # that 'frame_processor.py' is publishing to.
-        # image_data_exchange -> image_data_slam queue
-        # imu_data_exchange   -> imu_data_slam queue  (only if we are in mono_inertial mode)
-
         # 1) Declare fanout exchange (already done by publisher, but safe to re-declare):
         self.channel.exchange_declare(
-            exchange='image_data_exchange',
+            exchange=VIDEO_FRAMES_EXCHANGE,
             exchange_type='fanout',
             durable=True
         )
         self.channel.exchange_declare(
-            exchange='imu_data_exchange',
+            exchange=IMU_DATA_EXCHANGE,
             exchange_type='fanout',
             durable=True
         )
 
         # 2) Declare a queue for images
-        res_image = self.channel.queue_declare(queue='', exclusive=True)  # let Rabbit pick name
+        res_image = self.channel.queue_declare(queue='slam_video_input', exclusive=True)
         self.image_queue = res_image.method.queue
-        # Bind it
         self.channel.queue_bind(
-            exchange='image_data_exchange',
+            exchange=VIDEO_FRAMES_EXCHANGE,
             queue=self.image_queue,
             routing_key=''
         )
 
         self.imu_queue = None
         if self.slam_mode == "mono_inertial":
-            res_imu = self.channel.queue_declare(queue='', exclusive=True)  # ephemeral queue
+            res_imu = self.channel.queue_declare(queue='slam_imu_input', exclusive=True)
             self.imu_queue = res_imu.method.queue
-            # Bind it
             self.channel.queue_bind(
-                exchange='imu_data_exchange',
+                exchange=IMU_DATA_EXCHANGE,
                 queue=self.imu_queue,
                 routing_key=''
             )
 
         # 3) Declare a new fanout exchange to publish trajectory updates
-        # (multiple subscribers can read from it)
         self.channel.exchange_declare(
-            exchange='trajectory_data_exchange',
+            exchange=TRAJECTORY_DATA_EXCHANGE,
             exchange_type='fanout',
             durable=True
         )
@@ -169,107 +163,126 @@ class RunRGBD:
                 auto_ack=True
             )
 
+        # After setting up other queues, add restart queue setup
+        self.channel.exchange_declare(
+            exchange=RESTART_EXCHANGE,
+            exchange_type='fanout',
+            durable=True
+        )
+        res_restart = self.channel.queue_declare(queue='restart_slam', durable=True)
+        self.channel.queue_bind(
+            exchange=RESTART_EXCHANGE,
+            queue=res_restart.method.queue,
+            routing_key=''
+        )
+        self.channel.basic_consume(
+            queue=res_restart.method.queue,
+            on_message_callback=self._handle_restart,
+            auto_ack=True
+        )
+
         print(f" [*] Subscribed to fanout exchange(s) in mode={self.slam_mode}")
         print(f"     Image queue: {self.image_queue}")
         if self.imu_queue:
             print(f"     IMU queue:   {self.imu_queue}")
 
     def on_image_message(self, ch, method, properties, body):
-        """
-        Callback for image messages from 'image_data_exchange'.
-        Each message includes 'frame_data' (base64 image) and 'timestamp'.
-        """
         start_time = time.time()
         try:
-            data = json.loads(body)
-            frame_b64 = data['frame_data']
-            frame_ts_ns = data['timestamp']  # e.g. 1234567890123456
-
-            # Convert base64 -> image
-            frame_bytes = cv2.imdecode(
-                np.frombuffer(
-                    base64.b64decode(frame_b64),
-                    np.uint8
-                ),
-                cv2.IMREAD_COLOR
-            )
-            if frame_bytes is None:
+            # Ensure the header contains "timestamp_ns"; if not, discard the message.
+            if not (properties and properties.headers and "timestamp_ns" in properties.headers):
+                print("[!] No timestamp in image message; discarding message.")
+                return
+            frame_ts_ns = int(properties.headers.get("timestamp_ns"))
+            # Decode the raw JPEG bytes directly
+            frame = cv2.imdecode(np.frombuffer(body, np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
                 print(" [!] Received invalid image frame.")
                 return
 
-            # Convert timestamp from ns to seconds
             frame_ts_s = frame_ts_ns / 1e9
 
-            # For a real solution, you'd gather all IMU up to 'frame_ts_s'
-            # for mono_inertial. We'll do a naive approach, ignoring partial sync.
             if self.slam_mode == "mono_inertial":
                 imu_measurements = self.imu_buffer[:]
                 self.imu_buffer.clear()
-
-                # Call ORB-SLAM
-                success = self.slam.process_image_mono_inertial(frame_bytes, frame_ts_s, imu_measurements)
+                success = self.slam.process_image_mono_inertial(frame, frame_ts_s, imu_measurements)
             else:
-                # Monocular only
-                success = self.slam.process_image_mono(frame_bytes, frame_ts_s)
+                success = self.slam.process_image_mono(frame, frame_ts_s)
 
-            # Update metrics: frames processed
             slam_frames_processed.inc()
-
-            # measure time
             elapsed = time.time() - start_time
             slam_frame_latency.observe(elapsed)
-
-            # If you want a rough FPS, you can do 1/elapsed for each frame
-            # but be aware it's noisy frame-by-frame. This is a naive approach:
             slam_fps_gauge.set(1.0 / elapsed if elapsed > 0 else 0.0)
 
-            # Publish trajectory if we have a valid pose
             if success:
                 last_pose = self.slam.get_trajectory()
                 if last_pose and len(last_pose) > 0:
                     pose = last_pose[-1]
-                    if isinstance(pose, np.ndarray):
-                        pose_list = pose.tolist()
-                    else:
-                        pose_list = pose
+                    pose_list = pose.tolist() if isinstance(pose, np.ndarray) else pose
                     msg = {
                         "timestamp_ns": frame_ts_ns,
                         "pose": pose_list
                     }
                     self.channel.basic_publish(
-                        exchange='trajectory_data_exchange',
+                        exchange=TRAJECTORY_DATA_EXCHANGE,
                         routing_key='',
                         body=json.dumps(msg)
                     )
                     print(f"Published LATEST pose at {frame_ts_ns} ns")
-
         except Exception as e:
             print(f"Error in on_image_message: {e}")
-
 
     def on_imu_message(self, ch, method, properties, body):
         """
         Callback for IMU messages from 'imu_data_exchange'.
-        data includes 'timestamp' (ns), 'angular_velocity', 'linear_acceleration'
+        The expected message format is:
+          {
+             "type": "imu_data",
+             "timestamp": <ns>,
+             "imu_data": {
+                  "velocity": {"x": ..., "y": ..., "z": ...},
+                  "attitude": {"pitch": ..., "roll": ..., "yaw": ...},
+                  ... (other keys)
+             }
+          }
+        This function extracts the top-level timestamp and maps:
+          - 'attitude' values to the gyroscope (angular velocity)
+          - 'velocity' values to the accelerometer (linear acceleration)
+        If any required key is missing, the message is discarded.
         """
         try:
             data = json.loads(body)
-            imu_ts_ns = data['timestamp']
-            gyro = data['angular_velocity']   # [gx, gy, gz]
-            accel = data['linear_acceleration']  # [ax, ay, az]
-
-            # Convert to orbslam3.IMU.Point if your orbslam3 binding requires that
-            # We'll store in a simple dict for demonstration
+            if 'timestamp' not in data or 'imu_data' not in data:
+                print("[!] IMU message missing 'timestamp' or 'imu_data'; discarding message.")
+                return
+            imu_ts = data['timestamp']
+            imu_data = data['imu_data']
+            if 'velocity' not in imu_data or 'attitude' not in imu_data:
+                print("[!] IMU message missing 'velocity' or 'attitude' in 'imu_data'; discarding message.")
+                return
+            velocity = imu_data['velocity']
+            attitude = imu_data['attitude']
+            # Map attitude to gyro and velocity to accel.
             imu_point = {
-                "timestamp_s": imu_ts_ns / 1e9,
-                "gyro": gyro,
-                "accel": accel
+                "timestamp_s": imu_ts / 1e9,
+                "gyro": [attitude.get('pitch', 0), attitude.get('roll', 0), attitude.get('yaw', 0)],
+                "accel": [velocity.get('x', 0), velocity.get('y', 0), velocity.get('z', 0)]
             }
-            # Append to buffer
             self.imu_buffer.append(imu_point)
-
         except Exception as e:
             print(f"Error in on_imu_message: {e}")
+
+    def _handle_restart(self, ch, method, properties, body):
+        """Handle restart messages to reinitialize the SLAM system."""
+        try:
+            msg = json.loads(body)
+            if msg.get("type") == "restart":
+                print("Restart command received in SLAM. Refreshing SLAM system...")
+                self.slam.shutdown()
+                self.slam = load_slam_system(self.slam_mode)
+                self.imu_buffer.clear()
+        except Exception as e:
+            print("Error handling restart in SLAM:", e)
 
     def run_forever(self):
         """
