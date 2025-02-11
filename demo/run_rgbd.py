@@ -214,21 +214,44 @@ class RunRGBD:
             slam_frame_latency.observe(elapsed)
             slam_fps_gauge.set(1.0 / elapsed if elapsed > 0 else 0.0)
 
-            if success:
-                last_pose = self.slam.get_trajectory()
-                if last_pose and len(last_pose) > 0:
-                    pose = last_pose[-1]
-                    pose_list = pose.tolist() if isinstance(pose, np.ndarray) else pose
-                    msg = {
-                        "timestamp_ns": frame_ts_ns,
-                        "pose": pose_list
-                    }
+            # --- (1) Always publish the current trajectory if available ---
+            last_pose = self.slam.get_trajectory()
+            if last_pose and len(last_pose) > 0:
+                pose = last_pose[-1]
+                # Convert to list if needed (for JSON serialization)
+                pose_list = pose.tolist() if isinstance(pose, np.ndarray) else pose
+                # Optionally include a flag indicating whether tracking was successful
+                msg = {
+                    "timestamp_ns": frame_ts_ns,
+                    "pose": pose_list,
+                    "tracking_success": success
+                }
+                self.channel.basic_publish(
+                    exchange=TRAJECTORY_DATA_EXCHANGE,
+                    routing_key='',
+                    body=json.dumps(msg)
+                )
+                print(f"Published LATEST pose at {frame_ts_ns} ns, tracking: {success}")
+
+            # --- (2) Detect tracking failure and publish restart if needed ---
+            if not success:
+                self.failed_tracking_counter += 1
+                # For example, if there are three consecutive failures, trigger a restart.
+                if self.failed_tracking_counter >= 1 and not self.restart_sent:
+                    print("Tracking failure threshold reached, sending restart command")
+                    restart_msg = json.dumps({"type": "restart"})
                     self.channel.basic_publish(
-                        exchange=TRAJECTORY_DATA_EXCHANGE,
+                        exchange=RESTART_EXCHANGE,
                         routing_key='',
-                        body=json.dumps(msg)
+                        body=restart_msg
                     )
-                    print(f"Published LATEST pose at {frame_ts_ns} ns")
+                    self.restart_sent = True
+                    self.failed_tracking_counter = 0  # reset the counter after issuing restart
+            else:
+                # If processing was successful, reset failure count and flag.
+                self.failed_tracking_counter = 0
+                self.restart_sent = False
+
         except Exception as e:
             print(f"Error in on_image_message: {e}")
 
