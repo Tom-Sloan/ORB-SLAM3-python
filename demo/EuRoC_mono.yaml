@@ -16,31 +16,31 @@
 # Camera Parameters. Adjust them!
 #--------------------------------------------------------------------------------------------
 File.version: "1.0"
-
 Camera.type: "PinHole"
 
-# Camera calibration and distortion parameters (OpenCV) 
-Camera1.fx: 458.654
-Camera1.fy: 457.296
-Camera1.cx: 367.215
-Camera1.cy: 248.375
+# Camera calibration and distortion parameters (from OpenCV calibration)
+Camera1.fx: 905.9805764723004
+Camera1.fy: 903.8697216493965
+Camera1.cx: 628.6583531774853
+Camera1.cy: 348.90016625665316
 
-Camera1.k1: -0.28340811
-Camera1.k2: 0.07395907
-Camera1.p1: 0.00019359
-Camera1.p2: 1.76187114e-05
+Camera1.k1: 0.20796653247283758
+Camera1.k2: -1.0209783326144832
+Camera1.p1: -0.0005810334199116348
+Camera1.p2: -0.0033936448334717616
 
-Camera.width: 752
-Camera.height: 480
+# Adjust image dimensions (update as needed)
+Camera.width: 1280
+Camera.height: 720
 
-Camera.newWidth: 600
-Camera.newHeight: 350
+Camera.newWidth: 640
+Camera.newHeight: 480
 
-# Camera frames per second 
-Camera.fps: 20
+# Camera frames per second
+Camera.fps: 30
 
-# Color order of the images (0: BGR, 1: RGB. It is ignored if images are grayscale)
-Camera.RGB: 1
+# Color order of the images (0: BGR, 1: RGB)
+Camera.RGB: 0
 
 #--------------------------------------------------------------------------------------------
 # ORB Parameters
