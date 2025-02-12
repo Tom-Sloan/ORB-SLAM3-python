@@ -100,6 +100,7 @@ class RunRGBD:
 
         # We store images + IMU in memory if we need to unify them.
         self.imu_buffer = []
+        self.last_image_timestamps = []
         self.slam = load_slam_system(self.slam_mode)
 
         # ---- Setup RabbitMQ Connection ----
@@ -170,7 +171,7 @@ class RunRGBD:
                 on_message_callback=self.on_imu_message,
                 auto_ack=True
             )
-            
+
         self.channel.exchange_declare(
             exchange=RESTART_EXCHANGE,
             exchange_type='fanout',
@@ -196,22 +197,35 @@ class RunRGBD:
     def on_image_message(self, ch, method, properties, body):
         start_time = time.time()
         try:
-            # Ensure the header contains "timestamp_ns"; if not, discard the message.
+            # Get the image timestamp from the message header.
             if not (properties and properties.headers and "timestamp_ns" in properties.headers):
                 print("[!] No timestamp in image message; discarding message.")
                 return
             frame_ts_ns = int(properties.headers.get("timestamp_ns"))
-            # Decode the raw JPEG bytes directly
+            frame_ts_s = frame_ts_ns / 1e9
+
+            # Update our list of the last 4 image timestamps.
+            self.last_image_timestamps.append(frame_ts_s)
+            if len(self.last_image_timestamps) > 4:
+                self.last_image_timestamps.pop(0)  # remove the oldest timestamp
+
+            # Decode the JPEG image.
             frame = cv2.imdecode(np.frombuffer(body, np.uint8), cv2.IMREAD_COLOR)
             if frame is None:
                 print(" [!] Received invalid image frame.")
                 return
 
-            frame_ts_s = frame_ts_ns / 1e9
-
+            # If running in inertial mode, synchronize with buffered IMU measurements.
             if self.slam_mode == "mono_inertial":
-                imu_measurements = self.imu_buffer[:]
-                self.imu_buffer.clear()
+                imu_measurements = []
+                remaining_imu = []
+                for imu in self.imu_buffer:
+                    if imu["timestamp_s"] <= frame_ts_s:
+                        imu_measurements.append(imu)
+                    else:
+                        remaining_imu.append(imu)
+                self.imu_buffer = remaining_imu
+
                 success = self.slam.process_image_mono_inertial(frame, frame_ts_s, imu_measurements)
             else:
                 success = self.slam.process_image_mono(frame, frame_ts_s)
@@ -221,13 +235,11 @@ class RunRGBD:
             slam_frame_latency.observe(elapsed)
             slam_fps_gauge.set(1.0 / elapsed if elapsed > 0 else 0.0)
 
-            # --- (1) Always publish the current trajectory if available ---
+            # --- Publish trajectory and combined SLAM data (as before) ---
             last_pose = self.slam.get_trajectory()
             if last_pose and len(last_pose) > 0:
                 pose = last_pose[-1]
-                # Convert to list if needed (for JSON serialization)
                 pose_list = pose.tolist() if isinstance(pose, np.ndarray) else pose
-                # Publish to the original TRAJECTORY_DATA_EXCHANGE
                 msg = {
                     "timestamp_ns": frame_ts_ns,
                     "pose": pose_list,
@@ -238,14 +250,10 @@ class RunRGBD:
                     routing_key='',
                     body=json.dumps(msg)
                 )
-                print(f"Published LATEST pose at {frame_ts_ns} ns, tracking: {success}")
-
-                # --- (2) Also publish a combined SLAM message (image + trajectory) ---
                 combined_msg = {
                     "timestamp_ns": frame_ts_ns,
                     "pose": pose_list,
                     "tracking_success": success,
-                    # Base64 encode the original image bytes (JPEG)
                     "image_b64": base64.b64encode(body).decode('utf-8')
                 }
                 self.channel.basic_publish(
@@ -253,12 +261,8 @@ class RunRGBD:
                     routing_key='',
                     body=json.dumps(combined_msg)
                 )
-                print(f"Published combined SLAM data at {frame_ts_ns} ns")
-
-            # --- (3) Detect tracking failure and publish restart if needed ---
             if not success:
                 self.failed_tracking_counter += 1
-                # For example, if there is a failure (or consecutive failures), trigger a restart.
                 if self.failed_tracking_counter >= 1 and not self.restart_sent:
                     print("Tracking failure threshold reached, sending restart command")
                     restart_msg = json.dumps({"type": "restart"})
@@ -268,34 +272,48 @@ class RunRGBD:
                         body=restart_msg
                     )
                     self.restart_sent = True
-                    self.failed_tracking_counter = 0  # reset the counter after issuing restart
+                    self.failed_tracking_counter = 0
             else:
-                # Reset failure count and flag on success.
                 self.failed_tracking_counter = 0
                 self.restart_sent = False
-
         except Exception as e:
             print(f"Error in on_image_message: {e}")
+
 
     def on_imu_message(self, ch, method, properties, body):
         try:
             data = json.loads(body)
-            if 'timestamp' not in data or 'imu_data' not in data:
-                print("[!] IMU message missing 'timestamp' or 'imu_data'; discarding message.")
+            # Check that the new expected keys exist.
+            if 'timestamp' not in data or 'accelerometer' not in data or 'gyroscope' not in data:
+                print("[!] IMU message missing required keys; discarding message.")
                 return
-            imu_ts = data['timestamp']
-            imu_data = data['imu_data']
-            if 'velocity' not in imu_data or 'attitude' not in imu_data:
-                print("[!] IMU message missing 'velocity' or 'attitude' in 'imu_data'; discarding message.")
-                return
-            velocity = imu_data['velocity']
-            attitude = imu_data['attitude']
+
+            imu_ts = data['timestamp']  # timestamp in nanoseconds
             imu_point = {
                 "timestamp_s": imu_ts / 1e9,
-                "gyro": [attitude.get('pitch', 0), attitude.get('roll', 0), attitude.get('yaw', 0)],
-                "accel": [velocity.get('x', 0), velocity.get('y', 0), velocity.get('z', 0)]
+                "gyro": [
+                    data['gyroscope'].get('x', 0),
+                    data['gyroscope'].get('y', 0),
+                    data['gyroscope'].get('z', 0)
+                ],
+                "accel": [
+                    data['accelerometer'].get('x', 0),
+                    data['accelerometer'].get('y', 0),
+                    data['accelerometer'].get('z', 0)
+                ]
             }
+
+            # Check if we have at least 4 image timestamps stored.
+            if len(self.last_image_timestamps) >= 4:
+                # Check if every image timestamp in the buffer is more than 1 second ahead
+                # of the IMU measurement's timestamp.
+                if all(image_ts - imu_point["timestamp_s"] > 1.0 for image_ts in self.last_image_timestamps):
+                    print("Discarding stale IMU reading: all last 4 image timestamps are >1 second in the future.")
+                    return  # Discard this IMU measurement
+
+            # Otherwise, add the new IMU measurement to the buffer.
             self.imu_buffer.append(imu_point)
+
         except Exception as e:
             print(f"Error in on_imu_message: {e}")
 
