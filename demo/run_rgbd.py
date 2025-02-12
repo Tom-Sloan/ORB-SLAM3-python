@@ -4,15 +4,9 @@ run_rgbd.py
 -----------
 Continuously listens for images (and optionally IMU data) from RabbitMQ queues, 
 runs ORB-SLAM3 in either monocular or mono-inertial mode, 
-and publishes resulting trajectory poses to a fanout exchange 'trajectory_exchange'.
-
-Requires:
-  pip install pika opencv-python-headless numpy orbslam3 (plus your other dependencies)
-
-Environment:
-  RABBITMQ_URL=amqp://rabbitmq  # or similar
-  SLAM_MODE=mono or mono_inertial
-  (or pass '--mode mono'/'--mode mono_inertial' as a command-line arg)
+and publishes resulting trajectory poses to a fanout exchange 'trajectory_exchange'
+as well as a combined message to a new exchange 'slam_data_exchange'.
+...
 """
 
 import os
@@ -53,6 +47,7 @@ VIDEO_FRAMES_EXCHANGE = os.getenv("VIDEO_FRAMES_EXCHANGE", "video_frames_exchang
 IMU_DATA_EXCHANGE = os.getenv("IMU_DATA_EXCHANGE", "imu_data_exchange")
 TRAJECTORY_DATA_EXCHANGE = os.getenv("TRAJECTORY_DATA_EXCHANGE", "trajectory_data_exchange")
 RESTART_EXCHANGE = os.getenv("RESTART_EXCHANGE", "restart_exchange")
+SLAM_DATA_EXCHANGE = os.getenv("SLAM_DATA_EXCHANGE", "slam_data_exchange")  # New exchange
 
 def load_slam_system(slam_mode: str):
     """
@@ -94,11 +89,14 @@ class RunRGBD:
     Example SLAM processor that:
      - Subscribes to image_data_exchange (and optional IMU)
      - Runs ORB-SLAM3 in either monocular or mono-inertial mode
-     - Publishes resulting trajectory to a new fanout exchange ('trajectory_exchange').
+     - Publishes resulting trajectory to a new fanout exchange ('trajectory_exchange')
+       and publishes a combined SLAM message (image+pose) to 'slam_data_exchange'.
     """
 
     def __init__(self, slam_mode="mono"):
         self.slam_mode = slam_mode
+        self.failed_tracking_counter = 0
+        self.restart_sent = False
 
         # We store images + IMU in memory if we need to unify them.
         self.imu_buffer = []
@@ -111,7 +109,7 @@ class RunRGBD:
         self.connection = pika.BlockingConnection(params)
         self.channel = self.connection.channel()
 
-        # 1) Declare fanout exchange (already done by publisher, but safe to re-declare):
+        # Declare fanout exchanges:
         self.channel.exchange_declare(
             exchange=VIDEO_FRAMES_EXCHANGE,
             exchange_type='fanout',
@@ -119,6 +117,17 @@ class RunRGBD:
         )
         self.channel.exchange_declare(
             exchange=IMU_DATA_EXCHANGE,
+            exchange_type='fanout',
+            durable=True
+        )
+        self.channel.exchange_declare(
+            exchange=TRAJECTORY_DATA_EXCHANGE,
+            exchange_type='fanout',
+            durable=True
+        )
+        # Declare the new combined exchange
+        self.channel.exchange_declare(
+            exchange=SLAM_DATA_EXCHANGE,
             exchange_type='fanout',
             durable=True
         )
@@ -142,7 +151,6 @@ class RunRGBD:
                 routing_key=''
             )
 
-        # 3) Declare a new fanout exchange to publish trajectory updates
         self.channel.exchange_declare(
             exchange=TRAJECTORY_DATA_EXCHANGE,
             exchange_type='fanout',
@@ -162,8 +170,7 @@ class RunRGBD:
                 on_message_callback=self.on_imu_message,
                 auto_ack=True
             )
-
-        # After setting up other queues, add restart queue setup
+            
         self.channel.exchange_declare(
             exchange=RESTART_EXCHANGE,
             exchange_type='fanout',
@@ -220,7 +227,7 @@ class RunRGBD:
                 pose = last_pose[-1]
                 # Convert to list if needed (for JSON serialization)
                 pose_list = pose.tolist() if isinstance(pose, np.ndarray) else pose
-                # Optionally include a flag indicating whether tracking was successful
+                # Publish to the original TRAJECTORY_DATA_EXCHANGE
                 msg = {
                     "timestamp_ns": frame_ts_ns,
                     "pose": pose_list,
@@ -233,10 +240,25 @@ class RunRGBD:
                 )
                 print(f"Published LATEST pose at {frame_ts_ns} ns, tracking: {success}")
 
-            # --- (2) Detect tracking failure and publish restart if needed ---
+                # --- (2) Also publish a combined SLAM message (image + trajectory) ---
+                combined_msg = {
+                    "timestamp_ns": frame_ts_ns,
+                    "pose": pose_list,
+                    "tracking_success": success,
+                    # Base64 encode the original image bytes (JPEG)
+                    "image_b64": base64.b64encode(body).decode('utf-8')
+                }
+                self.channel.basic_publish(
+                    exchange=SLAM_DATA_EXCHANGE,
+                    routing_key='',
+                    body=json.dumps(combined_msg)
+                )
+                print(f"Published combined SLAM data at {frame_ts_ns} ns")
+
+            # --- (3) Detect tracking failure and publish restart if needed ---
             if not success:
                 self.failed_tracking_counter += 1
-                # For example, if there are three consecutive failures, trigger a restart.
+                # For example, if there is a failure (or consecutive failures), trigger a restart.
                 if self.failed_tracking_counter >= 1 and not self.restart_sent:
                     print("Tracking failure threshold reached, sending restart command")
                     restart_msg = json.dumps({"type": "restart"})
@@ -248,7 +270,7 @@ class RunRGBD:
                     self.restart_sent = True
                     self.failed_tracking_counter = 0  # reset the counter after issuing restart
             else:
-                # If processing was successful, reset failure count and flag.
+                # Reset failure count and flag on success.
                 self.failed_tracking_counter = 0
                 self.restart_sent = False
 
@@ -256,23 +278,6 @@ class RunRGBD:
             print(f"Error in on_image_message: {e}")
 
     def on_imu_message(self, ch, method, properties, body):
-        """
-        Callback for IMU messages from 'imu_data_exchange'.
-        The expected message format is:
-          {
-             "type": "imu_data",
-             "timestamp": <ns>,
-             "imu_data": {
-                  "velocity": {"x": ..., "y": ..., "z": ...},
-                  "attitude": {"pitch": ..., "roll": ..., "yaw": ...},
-                  ... (other keys)
-             }
-          }
-        This function extracts the top-level timestamp and maps:
-          - 'attitude' values to the gyroscope (angular velocity)
-          - 'velocity' values to the accelerometer (linear acceleration)
-        If any required key is missing, the message is discarded.
-        """
         try:
             data = json.loads(body)
             if 'timestamp' not in data or 'imu_data' not in data:
@@ -285,7 +290,6 @@ class RunRGBD:
                 return
             velocity = imu_data['velocity']
             attitude = imu_data['attitude']
-            # Map attitude to gyro and velocity to accel.
             imu_point = {
                 "timestamp_s": imu_ts / 1e9,
                 "gyro": [attitude.get('pitch', 0), attitude.get('roll', 0), attitude.get('yaw', 0)],
@@ -296,7 +300,6 @@ class RunRGBD:
             print(f"Error in on_imu_message: {e}")
 
     def _handle_restart(self, ch, method, properties, body):
-        """Handle restart messages to reinitialize the SLAM system."""
         try:
             msg = json.loads(body)
             if msg.get("type") == "restart":
@@ -308,16 +311,11 @@ class RunRGBD:
             print("Error handling restart in SLAM:", e)
 
     def run_forever(self):
-        """
-        Start consuming from queues forever. This call is blocking.
-        """
         print(" [*] Starting blocking consume. Press Ctrl+C to stop.")
         try:
             self.channel.start_consuming()
         except KeyboardInterrupt:
             print("\n [x] Interrupted by user")
-
-        # Clean up
         self.slam.shutdown()
         self.connection.close()
 
