@@ -92,7 +92,7 @@ make -j8
 RUN pip3 install .
 
 # Install Python dependencies
-RUN pip3 install pillow pyparsing pytz six watchdog aio-pika pika opencv-python-headless prometheus_client
+RUN pip3 install pillow pyparsing pytz six watchdog aio-pika pika opencv-python-headless prometheus_client PyYAML
 WORKDIR /app
 
 ARG USERNAME

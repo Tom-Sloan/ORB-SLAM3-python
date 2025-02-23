@@ -18,6 +18,7 @@ import numpy as np
 import pika
 import argparse
 import base64
+import yaml
 
 # If you have orbslam3 installed as a Python module:
 import orbslam3
@@ -47,7 +48,13 @@ VIDEO_FRAMES_EXCHANGE = os.getenv("VIDEO_FRAMES_EXCHANGE", "video_frames_exchang
 IMU_DATA_EXCHANGE = os.getenv("IMU_DATA_EXCHANGE", "imu_data_exchange")
 TRAJECTORY_DATA_EXCHANGE = os.getenv("TRAJECTORY_DATA_EXCHANGE", "trajectory_data_exchange")
 RESTART_EXCHANGE = os.getenv("RESTART_EXCHANGE", "restart_exchange")
-SLAM_DATA_EXCHANGE = os.getenv("SLAM_DATA_EXCHANGE", "slam_data_exchange")  # New exchange
+SLAM_DATA_EXCHANGE = os.getenv("SLAM_DATA_EXCHANGE", "slam_data_exchange")  
+
+DRONE_CONFIG_PATH = os.environ.get("DRONE_CONFIG_PATH", "/app/drone_config.yaml")
+
+def load_drone_config(path):
+    with open(path, 'r') as f:
+        return yaml.safe_load(f)
 
 def load_slam_system(slam_mode: str):
     """
@@ -56,9 +63,21 @@ def load_slam_system(slam_mode: str):
     """
     this_dir = os.path.dirname(os.path.abspath(__file__))
 
+    try:
+        drone_cfg = load_drone_config(DRONE_CONFIG_PATH)
+        print(f"[continuous_reconstruction.py] Loaded drone_config.yaml from: {DRONE_CONFIG_PATH}")
+
+    except FileNotFoundError:
+        print(f"[ERROR] Could not find drone_config.yaml at {DRONE_CONFIG_PATH}")
+        raise FileNotFoundError(f"[ERROR] Could not find drone_config.yaml at {DRONE_CONFIG_PATH}")
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to load drone_config.yaml: {e}")
+        raise Exception(f"[ERROR] Failed to load drone_config.yaml: {e}")
+
     # Adjust these as needed or rename them in your project
     mono_config = os.path.join(this_dir, "EuRoC_mono.yaml")
-    inertial_config = os.path.join(this_dir, "EuRoC_mono_inertial.yaml")
+    inertial_config = DRONE_CONFIG_PATH
 
     # Path to ORB vocabulary
     vocabulary_path = os.path.join('third_party/ORB_SLAM3/Vocabulary/', "ORBvoc.txt")
@@ -93,7 +112,7 @@ class RunRGBD:
        and publishes a combined SLAM message (image+pose) to 'slam_data_exchange'.
     """
 
-    def __init__(self, slam_mode="mono"):
+    def __init__(self, slam_mode="mono_inertial"):
         self.slam_mode = slam_mode
         self.failed_tracking_counter = 0
         self.restart_sent = False
@@ -341,7 +360,7 @@ class RunRGBD:
 if __name__ == "__main__":
     start_http_server(8000)
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default=os.getenv("SLAM_MODE", "mono"),
+    parser.add_argument("--mode", default=os.getenv("SLAM_MODE", "mono_inertial"),
                         choices=["mono", "mono_inertial"],
                         help="SLAM mode to run: 'mono' or 'mono_inertial'")
     args = parser.parse_args()
