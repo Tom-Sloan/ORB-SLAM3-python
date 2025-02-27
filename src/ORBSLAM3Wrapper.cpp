@@ -145,12 +145,23 @@ PYBIND11_MODULE(orbslam3, m)
     py::module_ imu = m.def_submodule("IMU", "IMU related classes and functions");
     
     py::class_<ORB_SLAM3::IMU::Point>(imu, "Point")
-        .def(py::init<const float&, const float&, const float&,
-                     const float&, const float&, const float&,
-                     const double&>(),
-             py::arg("acc_x"), py::arg("acc_y"), py::arg("acc_z"),
-             py::arg("ang_vel_x"), py::arg("ang_vel_y"), py::arg("ang_vel_z"),
-             py::arg("timestamp"));
+    .def(py::init<const float&, const float&, const float&,
+                 const float&, const float&, const float&,
+                 const double&>(),
+         py::arg("acc_x"), py::arg("acc_y"), py::arg("acc_z"),
+         py::arg("ang_vel_x"), py::arg("ang_vel_y"), py::arg("ang_vel_z"),
+         py::arg("timestamp"))
+    // Expose the IMU data members as Python properties
+    .def_readonly("a", &ORB_SLAM3::IMU::Point::a)  // accelerometer data
+    .def_readonly("w", &ORB_SLAM3::IMU::Point::w)  // gyroscope data
+    .def_readonly("t", &ORB_SLAM3::IMU::Point::t)  // timestamp
+    // Also add some convenience getters for individual components
+    .def_property_readonly("ax", [](const ORB_SLAM3::IMU::Point &p) { return p.a[0]; })
+    .def_property_readonly("ay", [](const ORB_SLAM3::IMU::Point &p) { return p.a[1]; })
+    .def_property_readonly("az", [](const ORB_SLAM3::IMU::Point &p) { return p.a[2]; })
+    .def_property_readonly("wx", [](const ORB_SLAM3::IMU::Point &p) { return p.w[0]; })
+    .def_property_readonly("wy", [](const ORB_SLAM3::IMU::Point &p) { return p.w[1]; })
+    .def_property_readonly("wz", [](const ORB_SLAM3::IMU::Point &p) { return p.w[2]; });
 
     py::enum_<ORB_SLAM3::Tracking::eTrackingState>(m, "TrackingState")
         .value("SYSTEM_NOT_READY", ORB_SLAM3::Tracking::eTrackingState::SYSTEM_NOT_READY)

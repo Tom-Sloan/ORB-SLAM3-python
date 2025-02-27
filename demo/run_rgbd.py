@@ -115,8 +115,6 @@ def load_slam_system(slam_mode: str):
     return slam
 
 
-# Here's the fixed RunRGBD class with corrections for the duplicate method issue:
-
 class RunRGBD:
     """
     Example SLAM processor that:
@@ -310,6 +308,94 @@ class RunRGBD:
                 count += 1
         return count
     
+    def validate_imu_values(self, gyro, accel):
+        """Enhanced validation for IMU values"""
+        # Check for non-numeric values
+        if not all(isinstance(v, (int, float)) for v in gyro + accel):
+            print("[!] Non-numeric IMU values detected; discarding message.")
+            return False
+            
+        # Check for NaN or infinite values
+        if any(np.isnan(v) or np.isinf(v) for v in gyro + accel):
+            print("[!] NaN or infinite IMU values detected; discarding message.")
+            return False
+            
+        # Check for zero values in all components
+        if all(abs(v) < 1e-10 for v in gyro) and all(abs(v) < 1e-10 for v in accel):
+            print("[!] All IMU values near zero; discarding message.")
+            return False
+            
+        # Check for unreasonable values
+        MAX_GYRO = 10.0  # rad/s - maximum reasonable gyroscope reading
+        MAX_ACCEL = 30.0  # m/s² - maximum reasonable accelerometer reading
+        
+        if any(abs(v) > MAX_GYRO for v in gyro):
+            print(f"[!] Extreme gyro values detected: {gyro}; discarding.")
+            return False
+            
+        if any(abs(v) > MAX_ACCEL for v in accel):
+            print(f"[!] Extreme accel values detected: {accel}; discarding.")
+            return False
+            
+        return True
+
+    def create_imu_point(self, gyro, accel, ts):
+        """Safely create an IMU point ensuring no NaN or zero values"""
+        EPSILON = 1e-10
+        
+        # Apply epsilon with proper sign preservation
+        def safe_value(v):
+            if abs(v) < EPSILON:
+                return EPSILON if v >= 0 else -EPSILON
+            return v
+        
+        safe_gyro = [safe_value(g) for g in gyro]
+        safe_accel = [safe_value(a) for a in accel]
+        
+        # Extra validation
+        for i, g in enumerate(safe_gyro):
+            if np.isnan(g) or np.isinf(g):
+                print(f"Warning: After processing, gyro[{i}] is still invalid: {g}")
+                safe_gyro[i] = EPSILON
+        
+        for i, a in enumerate(safe_accel):
+            if np.isnan(a) or np.isinf(a):
+                print(f"Warning: After processing, accel[{i}] is still invalid: {a}")
+                safe_accel[i] = EPSILON
+                
+        # Create IMU point with validated values
+        return orbslam3.IMU.Point(
+            safe_gyro[0], safe_gyro[1], safe_gyro[2],
+            safe_accel[0], safe_accel[1], safe_accel[2],
+            ts
+        )
+
+    def debug_imu_measurements(self, imu_measurements):
+        """Log detailed debug information about IMU measurements"""
+        # print(f"Processing {len(imu_measurements)} IMU measurements")
+        for i, imu in enumerate(imu_measurements[:3]):  # Print first few for debugging
+            try:
+                # Use the correctly exposed attributes
+                # print(f"  IMU[{i}]: t={imu.t:.6f}, " +
+                #     f"gyro=({imu.wx:.6f}, {imu.wy:.6f}, {imu.wz:.6f}), " +
+                #     f"accel=({imu.ax:.6f}, {imu.ay:.6f}, {imu.az:.6f})")
+            
+                # Check for NaN values
+                try:
+                    has_nan = (
+                        np.isnan(imu.wx) or np.isnan(imu.wy) or np.isnan(imu.wz) or
+                        np.isnan(imu.ax) or np.isnan(imu.ay) or np.isnan(imu.az) or
+                        np.isnan(imu.t)
+                    )
+                    if has_nan:
+                        print(f"  [!] WARNING: NaN values detected in IMU[{i}]")
+                except Exception as e:
+                    print(f"  Error checking for NaN values in IMU[{i}]: {e}")
+                    print(f"  [!] WARNING: NaN values may be present in IMU[{i}]")
+                
+            except Exception as e:
+                print(f"  Error accessing IMU[{i}] attributes: {e}")
+            
     def _process_frame(self, frame, body, frame_ts_s, properties):
         """Process a frame with available IMU data."""
         try:
@@ -332,23 +418,13 @@ class RunRGBD:
                             accel = imu["accel"]
                             ts = imu["timestamp_s"]
                             
-                            # Skip invalid values
-                            if (any(np.isnan(v) or np.isinf(v) for v in gyro + accel) or 
-                                np.isnan(ts) or np.isinf(ts)):
-                                print(f"[!] Skipping IMU measurement with invalid values: {imu}")
+                            # Validate IMU values before processing
+                            if not self.validate_imu_values(gyro, accel):
+                                print(f"[!] IMU validation failed for measurement: {imu}")
                                 continue
-                            
-                            # Apply small epsilon to prevent zero values causing issues
-                            EPSILON = 1e-10
-                            gyro = [g if abs(g) > EPSILON else EPSILON for g in gyro]
-                            accel = [a if abs(a) > EPSILON else EPSILON for a in accel]
                                 
-                            # Convert dictionary to orbslam3.IMU.Point object
-                            imu_point = orbslam3.IMU.Point(
-                                gyro[0], gyro[1], gyro[2],  # gyroscope data (x,y,z)
-                                accel[0], accel[1], accel[2],  # accelerometer data (x,y,z)
-                                ts  # timestamp in seconds
-                            )
+                            # Safely create IMU point
+                            imu_point = self.create_imu_point(gyro, accel, ts)
                             imu_measurements.append(imu_point)
                             
                             # Publish processed IMU data
@@ -384,13 +460,26 @@ class RunRGBD:
             
             # Proceed with SLAM processing
             if valid_imu_count >= self.MIN_IMU_COUNT:
-                print(f"Added {valid_imu_count} IMU measurements for frame at {frame_ts_s}")
+                # print(f"Added {valid_imu_count} IMU measurements for frame at {frame_ts_s}")
+                
+                # Debug IMU measurements before processing
+                self.debug_imu_measurements(imu_measurements)
+                
                 success = False
                 processed = False
                 
                 try:
                     # Process frame with IMU data
                     if self.slam_mode == "mono_inertial":
+                        # Dump detailed IMU data before processing
+                        # print(f"About to process frame at timestamp {frame_ts_s}")
+                        # print(f"IMU measurements count: {len(imu_measurements)}")
+                        
+                        # for i, imu in enumerate(imu_measurements):
+                        #     print(f"  IMU[{i}] before processing: t={imu.t:.6f}, "
+                        #         f"wx={imu.wx:.6f}, wy={imu.wy:.6f}, wz={imu.wz:.6f}, "
+                        #         f"ax={imu.ax:.6f}, ay={imu.ay:.6f}, az={imu.az:.6f}")
+                        
                         success = self.slam.process_image_mono_inertial(frame, frame_ts_s, imu_measurements)
                         processed = True
                     else:
@@ -398,11 +487,11 @@ class RunRGBD:
                         processed = True
                 except Exception as e:
                     print(f"SLAM processing error: {e}")
-                    print(f"Frame timestamp: {frame_ts_s}")
-                    print(f"IMU measurements count: {len(imu_measurements)}")
-                    if len(imu_measurements) > 0:
-                        print(f"First IMU timestamp: {imu_measurements[0].t}")
-                        print(f"Last IMU timestamp: {imu_measurements[-1].t}")
+                    # print(f"Frame timestamp: {frame_ts_s}")
+                    # print(f"IMU measurements count: {len(imu_measurements)}")
+                    # if len(imu_measurements) > 0:
+                    #     print(f"First IMU timestamp: {imu_measurements[0].t}")
+                    #     print(f"Last IMU timestamp: {imu_measurements[-1].t}")
                 
                 # Update metrics and publish trajectory if processed
                 if processed:
@@ -518,7 +607,7 @@ class RunRGBD:
             frame_ts_ns = int(properties.headers.get("timestamp_ns"))
             frame_ts_s = frame_ts_ns / 1e9
             
-            print(f"Frame timestamp: {frame_ts_ns}")
+            # print(f"Frame timestamp: {frame_ts_ns}")
             
             with self.processing_lock:
                 # Add to timestamp history
@@ -544,7 +633,7 @@ class RunRGBD:
                 else:
                     # Not enough IMU data, add to buffer if space available
                     if len(self.frame_buffer) < self.MAX_FRAME_BUFFER_SIZE:
-                        print(f"Insufficient IMU measurements ({imu_count} < {self.MIN_IMU_COUNT}), buffering frame")
+                        # print(f"Insufficient IMU measurements ({imu_count} < {self.MIN_IMU_COUNT}), buffering frame")
                         self.frame_buffer.append({
                             "frame": frame,
                             "body": body,
@@ -585,20 +674,12 @@ class RunRGBD:
             gyro_y = data['gyroscope'].get('y', 0)
             gyro_z = data['gyroscope'].get('z', 0)
             
-            # Validate IMU values to prevent NaN errors
-            if (not all(isinstance(v, (int, float)) for v in [accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z]) or
-                any(np.isnan(v) for v in [accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z])):
-                print("[!] Invalid IMU values detected (NaN or non-numeric); discarding message.")
-                print(f"IMU message rejected, values: gyro=[{gyro_x}, {gyro_y}, {gyro_z}], accel=[{accel_x}, {accel_y}, {accel_z}]")
-                return
-                
-            # Add additional validation for unreasonable values that might cause numerical instability
-            MAX_GYRO = 10.0  # rad/s - maximum reasonable gyroscope reading
-            MAX_ACCEL = 30.0  # m/s² - maximum reasonable accelerometer reading (includes gravity)
+            # Collect values for validation
+            gyro = [gyro_x, gyro_y, gyro_z]
+            accel = [accel_x, accel_y, accel_z]
             
-            if (abs(gyro_x) > MAX_GYRO or abs(gyro_y) > MAX_GYRO or abs(gyro_z) > MAX_GYRO or
-                abs(accel_x) > MAX_ACCEL or abs(accel_y) > MAX_ACCEL or abs(accel_z) > MAX_ACCEL):
-                print(f"[!] Extreme IMU values detected: gyro=[{gyro_x}, {gyro_y}, {gyro_z}], accel=[{accel_x}, {accel_y}, {accel_z}]; discarding.")
+            # Enhanced validation for IMU values
+            if not self.validate_imu_values(gyro, accel):
                 return
                     
             imu_ts = data['timestamp']  # timestamp in nanoseconds
@@ -606,8 +687,8 @@ class RunRGBD:
             with self.processing_lock:
                 imu_point = {
                     "timestamp_s": imu_ts / 1e9,  # Convert nanoseconds to seconds
-                    "gyro": [gyro_x, gyro_y, gyro_z],  # Gyroscope data in rad/s
-                    "accel": [accel_x, accel_y, accel_z]  # Accelerometer data in m/s²
+                    "gyro": gyro,  # Gyroscope data in rad/s
+                    "accel": accel  # Accelerometer data in m/s²
                 }
                 
                 # More lenient timestamp filtering 
@@ -634,7 +715,6 @@ class RunRGBD:
             print(f"Error in on_imu_message: {e}")
             import traceback
             traceback.print_exc()
-    
     
     def _check_buffered_frames_after_imu(self):
         """Check if any buffered frames have enough IMU data after new IMU arrives"""
@@ -719,6 +799,7 @@ class RunRGBD:
             self.slam.shutdown()
         if self.connection and self.connection.is_open:
             self.connection.close()
+
 if __name__ == "__main__":
     start_http_server(8000)
     parser = argparse.ArgumentParser()
