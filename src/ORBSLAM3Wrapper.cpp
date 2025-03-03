@@ -1,19 +1,12 @@
+#include "ORBSLAM3Wrapper.h"
+#include <iostream>
+#include <cmath>
+// Make sure to include pybind11 headers at the top
 #include <pybind11/stl.h>
 #include <pybind11/eigen.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 
-#include <ORB_SLAM3/include/KeyFrame.h>
-#include <ORB_SLAM3/include/Converter.h>
-#include <ORB_SLAM3/include/Tracking.h>
-#include <ORB_SLAM3/include/MapPoint.h>
-#include <ORB_SLAM3/include/ImuTypes.h>
-
-#include <opencv2/core/core.hpp>
-#include <opencv2/highgui/highgui.hpp>
-#include <opencv2/imgproc.hpp>
-
-#include "ORBSLAM3Wrapper.h"
 #include "NDArrayConverter.h"
 
 namespace py = pybind11;
@@ -23,17 +16,29 @@ ORBSLAM3Python::ORBSLAM3Python(std::string vocabFile, std::string settingsFile, 
       settingsFile(settingsFile),
       sensorMode(sensorMode),
       system(nullptr),
-      bUseViewer(false)
+      bUseViewer(false),
+      mbMapResetOccurred(false),
+      mnResetCounter(0),
+      mbFirstFrame(true),
+      mLastTrackingState(ORB_SLAM3::Tracking::SYSTEM_NOT_READY)
 {
+    mvLastPosition = {0.0f, 0.0f, 0.0f};
 }
 
 ORBSLAM3Python::~ORBSLAM3Python()
 {
+    if (system) {
+        system->Shutdown();
+    }
 }
 
 bool ORBSLAM3Python::initialize()
 {
     system = std::make_shared<ORB_SLAM3::System>(vocabluaryFile, settingsFile, sensorMode, bUseViewer);
+    mbFirstFrame = true;
+    mbMapResetOccurred = false;
+    mnResetCounter = 0;
+    mLastTrackingState = ORB_SLAM3::Tracking::SYSTEM_NOT_READY;
     return true;
 }
 
@@ -47,6 +52,8 @@ void ORBSLAM3Python::reset()
     if (system)
     {
         system->Reset();
+        mbMapResetOccurred = true;
+        mnResetCounter++;
     }
 }
 
@@ -56,10 +63,23 @@ bool ORBSLAM3Python::processMono(cv::Mat image, double timestamp)
     {
         return false;
     }
+    
     if (image.data)
     {
         Sophus::SE3f pose = system->TrackMonocular(image, timestamp);
-        return !system->isLost();
+        
+        // Check for map reset after tracking
+        this->wasMapReset();  // Updates internal flags
+        
+        bool ok = !system->isLost();
+        
+        // If first frame or reset, clear flag after detection
+        if (mbFirstFrame) {
+            mbFirstFrame = false;
+            mbMapResetOccurred = false;
+        }
+        
+        return ok;
     }
     else
     {
@@ -67,22 +87,55 @@ bool ORBSLAM3Python::processMono(cv::Mat image, double timestamp)
     }
 }
 
-bool ORBSLAM3Python::processMonoInertial(cv::Mat image, double timestamp, std::vector<ORB_SLAM3::IMU::Point> imuMeas)
-{
-    if (!system)
-    {
+bool ORBSLAM3Python::processMonoInertial(cv::Mat image, double timestamp, std::vector<ORB_SLAM3::IMU::Point> imuMeas) {
+    if (!system) {
+        std::cout << "processMonoInertial - System not initialized!" << std::endl;
         return false;
     }
-    if (image.data)
-    {
+    
+    std::cout << "processMonoInertial - Processing frame at t=" << timestamp 
+              << " with " << imuMeas.size() << " IMU measurements" << std::endl;
+    
+    // Print all IMU measurements
+    for (size_t i = 0; i < imuMeas.size(); i++) {
+        std::cout << "processMonoInertial - IMU[" << i << "]: t=" << imuMeas[i].t 
+                  << ", acc=[" << imuMeas[i].a[0] << ", " << imuMeas[i].a[1] << ", " << imuMeas[i].a[2] 
+                  << "], angVel=[" << imuMeas[i].w[0] << ", " << imuMeas[i].w[1] << ", " << imuMeas[i].w[2] << "]" << std::endl;
+        
+        // Check for extreme values
+        if (std::abs(imuMeas[i].w[0]) > 100 || std::abs(imuMeas[i].w[1]) > 100 || std::abs(imuMeas[i].w[2]) > 100) {
+            std::cout << "WARNING: Extremely high angular velocity detected!" << std::endl;
+        }
+        
+        if (std::abs(imuMeas[i].a[0]) > 100 || std::abs(imuMeas[i].a[1]) > 100 || std::abs(imuMeas[i].a[2]) > 100) {
+            std::cout << "WARNING: Extremely high acceleration detected!" << std::endl;
+        }
+    }
+    
+    if (image.data) {
+        std::cout << "processMonoInertial - About to call TrackMonocular" << std::endl;
         Sophus::SE3f pose = system->TrackMonocular(image, timestamp, imuMeas);
-        return !system->isLost();
+        std::cout << "processMonoInertial - TrackMonocular completed" << std::endl;
+        
+        // Check for map reset after tracking
+        this->wasMapReset();  // Updates internal flags
+        
+        bool ok = !system->isLost();
+        
+        // If first frame or reset, clear flag after detection
+        if (mbFirstFrame) {
+            mbFirstFrame = false;
+            mbMapResetOccurred = false;
+        }
+        
+        return ok;
     }
     else
     {
         return false;
     }
 }
+
 bool ORBSLAM3Python::processStereo(cv::Mat leftImage, cv::Mat rightImage, double timestamp)
 {
     if (!system)
@@ -90,10 +143,23 @@ bool ORBSLAM3Python::processStereo(cv::Mat leftImage, cv::Mat rightImage, double
         std::cout << "you must call initialize() first!" << std::endl;
         return false;
     }
+    
     if (leftImage.data && rightImage.data)
     {
         auto pose = system->TrackStereo(leftImage, rightImage, timestamp);
-        return !system->isLost();
+        
+        // Check for map reset after tracking
+        this->wasMapReset();  // Updates internal flags
+        
+        bool ok = !system->isLost();
+        
+        // If first frame or reset, clear flag after detection
+        if (mbFirstFrame) {
+            mbFirstFrame = false;
+            mbMapResetOccurred = false;
+        }
+        
+        return ok;
     }
     else
     {
@@ -108,10 +174,23 @@ bool ORBSLAM3Python::processRGBD(cv::Mat image, cv::Mat depthImage, double times
         std::cout << "you must call initialize() first!" << std::endl;
         return false;
     }
+    
     if (image.data && depthImage.data)
     {
         auto pose = system->TrackRGBD(image, depthImage, timestamp);
-        return !system->isLost();
+        
+        // Check for map reset after tracking
+        this->wasMapReset();  // Updates internal flags
+        
+        bool ok = !system->isLost();
+        
+        // If first frame or reset, clear flag after detection
+        if (mbFirstFrame) {
+            mbFirstFrame = false;
+            mbMapResetOccurred = false;
+        }
+        
+        return ok;
     }
     else
     {
@@ -134,9 +213,114 @@ void ORBSLAM3Python::setUseViewer(bool useViewer)
 
 std::vector<Eigen::Matrix4f> ORBSLAM3Python::getTrajectory() const
 {
+    if (!system)
+        return std::vector<Eigen::Matrix4f>();
+        
     return system->GetCameraTrajectory();
 }
 
+int ORBSLAM3Python::getTrackingState() const
+{
+    if (!system)
+        return -1;
+        
+    return static_cast<int>(system->GetTrackingState());
+}
+
+bool ORBSLAM3Python::isLost() const
+{
+    if (!system)
+        return true;
+        
+    return system->isLost();
+}
+
+bool ORBSLAM3Python::wasMapReset()
+{
+    if (!system)
+        return false;
+        
+    // Various heuristics to detect map reset
+    bool resetDetected = false;
+    
+    // Check for an explicitly called reset
+    if (mbMapResetOccurred) {
+        resetDetected = true;
+        mbMapResetOccurred = false; // Clear the flag after reporting
+        return resetDetected;
+    }
+    
+    // Method 1: Check for tracking state changes from OK to something else
+    // Use explicit casting from int to enum type
+    int rawState = system->GetTrackingState();
+    ORB_SLAM3::Tracking::eTrackingState currentState = static_cast<ORB_SLAM3::Tracking::eTrackingState>(rawState);
+    
+    if (mLastTrackingState == ORB_SLAM3::Tracking::OK &&
+        (currentState == ORB_SLAM3::Tracking::NOT_INITIALIZED || 
+         currentState == ORB_SLAM3::Tracking::RECENTLY_LOST)) {
+        std::cout << "Map reset detected: Tracking state changed from OK to " 
+                  << (currentState == ORB_SLAM3::Tracking::NOT_INITIALIZED ? "NOT_INITIALIZED" : "RECENTLY_LOST")
+                  << std::endl;
+        resetDetected = true;
+    }
+    
+    mLastTrackingState = currentState;
+    
+    // Method 2: Check if there's a large position jump in trajectory
+    auto trajectory = getTrajectory();
+    if (!trajectory.empty()) {
+        Eigen::Matrix4f lastPose = trajectory.back();
+        float x = lastPose(0, 3);
+        float y = lastPose(1, 3);
+        float z = lastPose(2, 3);
+        
+        // Calculate position difference
+        if (!mbFirstFrame) {
+            float dx = x - mvLastPosition[0];
+            float dy = y - mvLastPosition[1];
+            float dz = z - mvLastPosition[2];
+            float positionChange = std::sqrt(dx*dx + dy*dy + dz*dz);
+            
+            // If jump is too large, it's likely a reset occurred
+            // Threshold depends on your camera motion patterns
+            const float positionThreshold = 1.0f; // 1 meter threshold - adjust as needed
+            
+            if (positionChange > positionThreshold && 
+                system->GetTrackingState() != ORB_SLAM3::Tracking::LOST) {
+                std::cout << "Map reset detected: Large position jump of " 
+                          << positionChange << " m" << std::endl;
+                resetDetected = true;
+            }
+        }
+        
+        // Update last position
+        mvLastPosition[0] = x;
+        mvLastPosition[1] = y;
+        mvLastPosition[2] = z;
+    }
+    
+    // If reset detected, increment counter
+    if (resetDetected) {
+        mnResetCounter++;
+    }
+    
+    // Special case for first frame
+    if (mbFirstFrame) {
+        mbFirstFrame = false;
+        return false;
+    }
+    
+    return resetDetected;
+}
+
+// Method to retrieve the reset counter
+int ORBSLAM3Python::getResetCount() const
+{
+    return mnResetCounter;
+}
+
+
+// Add this to your pybind11 module definition - make sure it's properly formatted
 PYBIND11_MODULE(orbslam3, m)
 {
     NDArrayConverter::init_numpy();
@@ -191,5 +375,10 @@ PYBIND11_MODULE(orbslam3, m)
         .def("is_running", &ORBSLAM3Python::isRunning)
         .def("reset", &ORBSLAM3Python::reset)
         .def("set_use_viewer", &ORBSLAM3Python::setUseViewer)
-        .def("get_trajectory", &ORBSLAM3Python::getTrajectory);
+        .def("get_trajectory", &ORBSLAM3Python::getTrajectory)
+        // New methods for reset detection and tracking state
+        .def("was_map_reset", &ORBSLAM3Python::wasMapReset)
+        .def("is_lost", &ORBSLAM3Python::isLost)
+        .def("get_reset_count", &ORBSLAM3Python::getResetCount)
+        .def("get_tracking_state", &ORBSLAM3Python::getTrackingState);
 }

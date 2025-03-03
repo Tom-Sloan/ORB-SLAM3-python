@@ -116,4 +116,4 @@ RUN echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 USER $USERNAME
 RUN echo "*customization: -color" > $HOME/.Xdefaults
 
-CMD ["python3", "./demo/run_rgbd.py"] 
+CMD ["python3", "./aaa/run_rgbd.py"] 
